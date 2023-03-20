@@ -31,26 +31,31 @@ function generateImei(uin: number) {
 	return imei + calcSP(imei)
 }
 
+function randStr(length: number, num = false) {
+	let result = ''
+	const map = num ? '0123456789' : '0123456789abcdef'
+	for (let i = length; i > 0; --i) result += map[Math.floor(Math.random() * map.length)]
+	return result
+}
+
 /** 生成短设备信息 */
 export function generateShortDevice(uin: number) {
-	const hash = md5(String(uin))
-	const hex = hash.toString("hex")
 	return {
 		"--begin--": "该设备由账号作为seed固定生成，账号不变则永远相同",
-		product: "MRS4S",
-		device: "HIM188MOE",
-		board: "MIRAI-YYDS",
-		brand: "OICQX",
-		model: "Konata 2020",
-		wifi_ssid: `TP-LINK-${uin.toString(16)}`,
+		product:      `ILPP-${randStr(5).toUpperCase()}`,
+		device:       `${randStr(5).toUpperCase()}`,
+		board:        `${randStr(5).toUpperCase()}`,
+		brand:        `${randStr(4).toUpperCase()}`,
+		model:        `ILPP ${randStr(4).toUpperCase()}`,
+		wifi_ssid: `HUAWEI-${randStr(7)}`,
 		bootloader: "U-boot",
-		android_id: `OICQX.${hash.readUInt16BE()}${hash[2]}.${hash[3]}${String(uin)[0]}`,
-		boot_id: hex.substr(0, 8) + "-" + hex.substr(8, 4) + "-" + hex.substr(12, 4) + "-" + hex.substr(16, 4) + "-" + hex.substr(20),
-		proc_version: `Linux version 4.19.71-${hash.readUInt16BE(4)} (konata@takayama.github.com)`,
-		mac_address: `00:50:${hash[6].toString(16).toUpperCase()}:${hash[7].toString(16).toUpperCase()}:${hash[8].toString(16).toUpperCase()}:${hash[9].toString(16).toUpperCase()}`,
-		ip_address: `10.0.${hash[10]}.${hash[11]}`,
-		imei: generateImei(uin),
-		incremental: hash.readUInt32BE(12),
+		android_id:   `IL.${randStr(7, true)}.${randStr(4, true)}`,
+		boot_id:      `${randStr(8)}-${randStr(4)}-${randStr(4)}-${randStr(4)}-${randStr(12,)}`,
+		proc_version: `Linux version 5.10.101-android12-${randStr(8)}`,
+		mac_address:  `2D:${randStr(2).toUpperCase()}:${randStr(2).toUpperCase()}:${randStr(2,).toUpperCase()}:${randStr(2).toUpperCase()}:${randStr(2).toUpperCase()}`,
+		ip_address:   `192.168.${randStr(2, true)}.${randStr(2, true)}`,
+		imei:         `86${randStr(13, true)}`,
+		incremental:  `${randStr(10).toUpperCase()}`,
 		"--end--": "修改后可能需要重新验证设备",
 	}
 }
@@ -109,18 +114,18 @@ export type Apk = typeof mobile
 
 const mobile = {
 	id: "com.tencent.mobileqq",
-	name: "A8.8.80.7400",
-	version: "8.8.80.7400",
-	ver: "8.8.80",
+	name: "A8.9.30.10200",
+	version: "8.9.30.10200",
+	ver: "8.9.30",
 	sign: Buffer.from([166, 183, 69, 191, 36, 162, 194, 119, 82, 119, 22, 246, 243, 110, 182, 141]),
-	buildtime: 1640921786,
+	buildtime: 1671103213,
 	appid: 16,
-	subid: 537143609,
+	subid: 537150482,
 	bitmap: 184024956,
 	sigmap: 34869472,
 	sdkver: "6.0.0.2494",
 	display: "Android",
-}
+};
 const watch: Apk = {
 	id: "com.tencent.qqlite",
 	name: "A2.0.5",
@@ -143,7 +148,7 @@ const hd: Apk = {
 	sign: Buffer.from([170, 57, 120, 244, 31, 217, 111, 249, 145, 74, 102, 158, 24, 100, 116, 199]),
 	buildtime: 1637427966,
 	appid: 16,
-	subid: 537067382,
+	subid: 537150493,
 	bitmap: 150470524,
 	sigmap: 1970400,
 	sdkver: "6.0.0.2487",
@@ -160,7 +165,7 @@ const apklist: {[platform in Platform]: Apk} = {
 
 apklist[Platform.iMac].subid = 537128930
 apklist[Platform.iMac].display = "iMac"
-apklist[Platform.iPad].subid = 537118796
+apklist[Platform.iPad].subid = 537149258
 apklist[Platform.iPad].display = "iPad"
 
 export function getApkInfo(p: Platform): Apk {

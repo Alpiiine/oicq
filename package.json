@@ -1,6 +1,6 @@
 {
-  "name": "oicq",
-  "version": "2.3.1",
+  "name": "@alpiiine/oicq",
+  "version": "0.0.1",
   "upday": "2022/6/21",
   "description": "QQ protocol!",
   "main": "lib/index.js",
@@ -11,7 +11,7 @@
   "engines": {
     "node": ">= v14"
   },
-  "repository": "https://github.com/takayama-lily/oicq",
+  "repository": "https://github.com/Alpiiine/oicq",
   "keywords": [
     "qq",
     "oicq",
@@ -22,9 +22,9 @@
   ],
   "author": "takayama",
   "license": "MPL-2.0",
-  "bugs": "https://github.com/takayama-lily/oicq/issues",
-  "homepage": "https://github.com/takayama-lily/oicq#readme",
-  "changelogs": "https://github.com/takayama-lily/oicq/releases",
+  "bugs": "https://github.com/Alpiiine/oicq/issues",
+  "homepage": "https://github.com/Alpiiine/oicq#readme",
+  "changelogs": "https://github.com/Alpiiine/oicq/releases",
   "dependencies": {
     "axios": "^1.1.2",
     "log4js": "^6.3.0",
