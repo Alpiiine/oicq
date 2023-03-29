@@ -165,7 +165,7 @@ const apklist: {[platform in Platform]: Apk} = {
 
 apklist[Platform.iMac].subid = 537128930
 apklist[Platform.iMac].display = "iMac"
-apklist[Platform.iPad].subid = 537149258
+apklist[Platform.iPad].subid = 537151363
 apklist[Platform.iPad].display = "iPad"
 
 export function getApkInfo(p: Platform): Apk {
