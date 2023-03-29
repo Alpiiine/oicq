@@ -3,6 +3,7 @@ import { pb } from "../core"
 import { lock, parseFunString, GroupRole, Gender, log } from "../common"
 import { Parser, parse} from "./parser"
 import { Quotable, Forwardable, MessageElem, FileElem } from "./elements"
+import querystring from "querystring";
 
 /** 匿名情报 */
 export interface Anonymous {
@@ -114,12 +115,12 @@ export abstract class Message implements Quotable, Forwardable {
 	static deserialize(serialized: Buffer, uin?: number) {
 		const proto = pb.decode(serialized)
 		switch (proto[1][3]) {
-		case 82:
-			return new GroupMessage(proto)
-		case 83:
-			return new DiscussMessage(proto)
-		default:
-			return new PrivateMessage(proto, uin)
+			case 82:
+				return new GroupMessage(proto)
+			case 83:
+				return new DiscussMessage(proto)
+			default:
+				return new PrivateMessage(proto, uin)
 		}
 	}
 
@@ -167,7 +168,7 @@ export abstract class Message implements Quotable, Forwardable {
 				message: parse(Array.isArray(q[5]) ? q[5] : [q[5]]).brief,
 			}
 		}
-		
+
 		lock(this, "proto")
 		lock(this, "parsed")
 		lock(this, "pktnum")
@@ -184,10 +185,44 @@ export abstract class Message implements Quotable, Forwardable {
 	toString() {
 		return this.parsed.content
 	}
+	toJSON(keys:string[]):Record<string, any>{
+		return Object.fromEntries(Object.keys(this).filter((key)=>{
+			return typeof this[key as keyof this]!=="function" && !keys.includes(key as any)
+		}).map(key=>{
+			return [key,this[key as keyof this]]
+		}))
+	}
 
 	/** @deprecated 转换为CQ码 */
 	toCqcode() {
-		return genCqcode(this.message)
+		const mCQInside = {
+			"&": "&amp;",
+			",": "&#44;",
+			"[": "&#91;",
+			"]": "&#93;",
+		};
+		let cqcode = "";
+
+		if (this.source) {
+			const quote = { ...this.source, flag: 1 };
+			const mid = genDmMessageId(this.user_id, quote.seq, quote.rand, quote.time, quote.flag);
+
+			cqcode += `[CQ:reply,id=${mid}]`;
+		}
+		(this.message || []).forEach((c) => {
+			if ("text" === c.type) {
+				cqcode += c.text;
+				return;
+			}
+			const s = querystring.stringify(c as any, ",", "=", {
+				encodeURIComponent: (s) =>
+					s.replace(new RegExp(Object.keys(mCQInside).join("|"), "g"), ((s:'&'|','|'['|']') => mCQInside[s] || "") as any),
+			});
+			const cq = `[CQ:${c.type}${s ? "," : ""}${s}]`;
+
+			cqcode += cq;
+		});
+		return cqcode;
 	}
 }
 
@@ -219,35 +254,35 @@ export class PrivateMessage extends Message {
 		this.to_id = head[2]
 		this.auto_reply = !!(content && content[4])
 		switch (head[3]) {
-		case 529:
-			if (head[4] === 4) {
-				const trans = body[2][1]
-				if (trans[1] !== 0)
-					throw new Error("unsupported message (ignore ok)")
-				const elem = {
-					type: "file",
-					name: String(trans[5]),
-					size: trans[6],
-					md5: trans[4]?.toHex() || "",
-					duration: trans[51] || 0,
-					fid: String(trans[3]),
-				} as FileElem
-				this.message = [elem]
-				this.raw_message = "[离线文件]"
-				this.parsed.content = `{file:${elem.fid}}`
-			} else {
-				this.sub_type = this.from_id === this.to_id ? "self" : "other"
-				this.message = this.raw_message = this.parsed.content = body[2]?.[6]?.[5]?.[1]?.[2]?.toString() || ""
-			}
-			break
-		case 141:
-			this.sub_type = "group"
-			this.sender.nickname = this.parsed.extra?.[1]?.toString() || ""
-			if (head[8]?.[3])
-				this.sender.group_id = head[8]?.[4]
-			else
-				this.sender.discuss_id = head[8]?.[4]
-			break
+			case 529:
+				if (head[4] === 4) {
+					const trans = body[2][1]
+					if (trans[1] !== 0)
+						throw new Error("unsupported message (ignore ok)")
+					const elem = {
+						type: "file",
+						name: String(trans[5]),
+						size: trans[6],
+						md5: trans[4]?.toHex() || "",
+						duration: trans[51] || 0,
+						fid: String(trans[3]),
+					} as FileElem
+					this.message = [elem]
+					this.raw_message = "[离线文件]"
+					this.parsed.content = `{file:${elem.fid}}`
+				} else {
+					this.sub_type = this.from_id === this.to_id ? "self" : "other"
+					this.message = this.raw_message = this.parsed.content = body[2]?.[6]?.[5]?.[1]?.[2]?.toString() || ""
+				}
+				break
+			case 141:
+				this.sub_type = "group"
+				this.sender.nickname = this.parsed.extra?.[1]?.toString() || ""
+				if (head[8]?.[3])
+					this.sender.group_id = head[8]?.[4]
+				else
+					this.sender.discuss_id = head[8]?.[4]
+				break
 		}
 		let opposite = this.from_id, flag = 0
 		if (this.from_id === uin)
@@ -369,6 +404,7 @@ export class ForwardMessage implements Forwardable {
 	nickname: string
 	group_id?: number
 	time: number
+	seq:number
 	message: MessageElem[]
 	raw_message: string
 
@@ -381,6 +417,7 @@ export class ForwardMessage implements Forwardable {
 		this.proto = proto
 		const head = proto[1]
 		this.time = head[6] || 0
+		this.seq=head[5]
 		this.user_id = head[1] || 0
 		this.nickname = head[14]?.toString() || head[9]?.[4]?.toString() || ""
 		this.group_id = head[9]?.[1]

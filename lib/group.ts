@@ -4,9 +4,15 @@ import { pb, jce } from "./core"
 import { ErrorCode, drop } from "./errors"
 import { timestamp, code2uin, PB_CONTENT, NOOP, lock, hide } from "./common"
 import { Contactable } from "./internal"
-import { Sendable, GroupMessage, Image, ImageElem, buildMusic, MusicPlatform, Anonymous, parseGroupMessageId, Quotable, Converter } from "./message"
+import { Sendable, GroupMessage, Image, ImageElem,  Anonymous, parseGroupMessageId, Quotable, Converter } from "./message"
 import { Gfs } from "./gfs"
-import { MessageRet } from "./events"
+import {
+	DiscussMessageEvent, GroupAdminEvent, GroupInviteEvent,
+	GroupSignEvent,
+	GroupMessageEvent, GroupMuteEvent, GroupPokeEvent, GroupRecallEvent,
+	GroupRequestEvent, GroupTransferEvent, MemberDecreaseEvent, MemberIncreaseEvent,
+	MessageRet,
+} from "./events"
 import { GroupInfo, MemberInfo } from "./entities"
 
 type Client = import("./client").Client
@@ -30,7 +36,11 @@ const GI_BUF = pb.encode({
 	54: 0,
 	89: "",
 })
-
+export namespace Discuss{
+	export interface EventMap{
+		message(e:DiscussMessageEvent):void
+	}
+}
 /** 讨论组 */
 export class Discuss extends Contactable {
 
@@ -62,6 +72,7 @@ export class Discuss extends Contactable {
 			this.c.logger.error(`failed to send: [Discuss(${this.gid})] ${rsp[2]}(${rsp[1]})`)
 			drop(rsp[1], rsp[2])
 		}
+		this.c.stat.sent_msg_cnt++
 		this.c.logger.info(`succeed to send: [Discuss(${this.gid})] ` + brief)
 		return {
 			message_id: "",
@@ -72,6 +83,30 @@ export class Discuss extends Contactable {
 	}
 }
 
+export interface GroupMessageEventMap{
+	'message'(event:GroupMessageEvent):void
+	'message.normal'(event:GroupMessageEvent):void
+	'message.anonymous'(event:GroupMessageEvent):void
+}
+export interface GroupNoticeEventMap{
+	'notice'(event:MemberIncreaseEvent|GroupSignEvent | MemberDecreaseEvent | GroupRecallEvent | GroupAdminEvent | GroupMuteEvent | GroupTransferEvent | GroupPokeEvent):void
+	'notice.increase'(event:MemberIncreaseEvent):void
+	'notice.decrease'(event:MemberDecreaseEvent):void
+	'notice.recall'(event:GroupRecallEvent):void
+	'notice.admin'(event:GroupAdminEvent):void
+	'notice.ban'(event:GroupMuteEvent):void
+	'notice.sign'(event:GroupSignEvent):void
+	'notice.transfer'(event:GroupTransferEvent):void
+	'notice.poke'(event:GroupPokeEvent):void
+}
+export interface GroupRequestEventMap{
+	'request'(event:GroupRequestEvent | GroupInviteEvent):void
+	'request.add'(event:GroupRequestEvent):void
+	'request.invite'(event:GroupInviteEvent):void
+}
+export interface GroupEventMap extends GroupMessageEventMap,GroupNoticeEventMap,GroupRequestEventMap{
+}
+
 /** 群 */
 export interface Group {
 	/** 撤回消息 */
@@ -79,7 +114,6 @@ export interface Group {
 	recallMsg(msgid: string): Promise<boolean>
 	recallMsg(seq: number, rand: number, pktnum?: number): Promise<boolean>
 }
-
 /** 群 */
 export class Group extends Discuss {
 
@@ -250,14 +284,49 @@ export class Group extends Discuss {
 		}
 	}
 
-	/** 发送音乐分享 */
-	async shareMusic(platform: MusicPlatform, id: string) {
-		const body = await buildMusic(this.gid, platform, id, 1)
-		await this.c.sendOidb("OidbSvc.0xb77_9", pb.encode(body))
+	/**
+	 * 添加精华消息
+	 * @param seq
+	 * @param rand
+	 */
+	async addEssence(seq:number,rand:number){
+		const retPacket = await this.c.sendPacket('Oidb', 'OidbSvc.0xeac_1', {
+			1: this.gid,
+			2: seq,
+			3: rand,
+		})
+		const ret = pb.decode(retPacket)[4]
+		if (ret[1]) {
+			this.c.logger.error(`加精群消息失败： ${ret[2]}(${ret[1]})`)
+			drop(ret[1], ret[2])
+		} else {
+			return '设置精华成功'
+		}
+	}
+
+	/**
+	 * 移除精华消息
+	 * @param seq
+	 * @param rand
+	 */
+	async removeEssence(seq:number,rand:number){
+		const retPacket = await this.c.sendPacket('Oidb', 'OidbSvc.0xeac_2', {
+			1: this.gid,
+			2: seq,
+			3: rand,
+		})
+		const ret = pb.decode(retPacket)[4]
+		if (ret[1]) {
+			this.c.logger.error(`移除群精华消息失败： ${ret[2]}(${ret[1]})`)
+			drop(ret[1], ret[2])
+		} else {
+			return '移除群精华消息成功'
+		}
 	}
 
 	/**
 	 * 发送一条消息
+	 * @param content 引用回复的消息
 	 * @param source 引用回复的消息
 	 * @param anony 匿名
 	 */
@@ -279,7 +348,7 @@ export class Group extends Discuss {
 		})
 		const e = `internal.${this.gid}.${rand}`
 		let message_id = ""
-		this.c.once(e, (id) => message_id = id)
+		this.c.trapOnce(e, (id) => message_id = id)
 		try {
 			const payload = await this.c.sendUni("MessageSvc.PbSendMsg", body)
 			const rsp = pb.decode(payload)
@@ -288,7 +357,7 @@ export class Group extends Discuss {
 				drop(rsp[1], rsp[2])
 			}
 		} finally {
-			this.c.removeAllListeners(e)
+			this.c.offTrap(e)
 		}
 
 		// 分片专属屎山
@@ -297,10 +366,10 @@ export class Group extends Discuss {
 				const time = this.c.config.resend ? (converter.length <= 80 ? 2000 : 500) : 5000
 				message_id = await new Promise((resolve, reject) => {
 					const timeout = setTimeout(() => {
-						this.c.removeAllListeners(e)
+						this.c.offTrap(e)
 						reject()
 					}, time)
-					this.c.once(e, (id) => {
+					this.c.trapOnce(e, (id) => {
 						clearTimeout(timeout)
 						resolve(id)
 					})
@@ -309,10 +378,14 @@ export class Group extends Discuss {
 		} catch {
 			message_id = await this._sendMsgByFrag(converter)
 		}
+		this.c.stat.sent_msg_cnt++
 		this.c.logger.info(`succeed to send: [Group(${this.gid})] ` + converter.brief)
 		{
 			const { seq, rand, time } = parseGroupMessageId(message_id)
-			return { seq, rand, time, message_id}
+			const messageRet:MessageRet={ seq, rand, time, message_id}
+			this.c.emit('send',messageRet)
+
+			return messageRet
 		}
 	}
 
@@ -343,10 +416,10 @@ export class Group extends Discuss {
 		try {
 			return await new Promise((resolve: (id: string) => void, reject) => {
 				const timeout = setTimeout(() => {
-					this.c.removeAllListeners(e)
+					this.c.offTrap(e)
 					reject()
 				}, 5000)
-				this.c.once(e, (id) => {
+				this.c.trapOnce(e, (id) => {
 					clearTimeout(timeout)
 					resolve(id)
 				})
@@ -569,6 +642,21 @@ export class Group extends Discuss {
 		return pb.decode(payload)[4].toBuffer().length > 6
 	}
 
+	/**
+	 * 打卡
+	 */
+	async sign(){
+		const body=pb.encode({
+			2: {
+				1: String(this.c.uin),
+				2: String(this.gid),
+				3: this.c.apk.ver
+			}
+		})
+		const payload=await this.c.sendOidb('OidbSvc.0xeb7_1',body)
+		const rsp = pb.decode(payload);
+		return { result: rsp[3] & 0xffffffff };
+	}
 	/** 退群/解散 */
 	async quit() {
 		const buf = Buffer.allocUnsafe(8)
@@ -591,8 +679,8 @@ export class Group extends Discuss {
 	setCard(uid: number, card = "") {
 		return this.pickMember(uid).setCard(card)
 	}
-	kickMember(uid: number, block = false) {
-		return this.pickMember(uid).kick(block)
+	kickMember(uid: number,msg?:string, block = false) {
+		return this.pickMember(uid).kick(msg,block)
 	}
 	muteMember(uid: number, duration = 600) {
 		return this.pickMember(uid).mute(duration)

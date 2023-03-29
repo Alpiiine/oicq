@@ -85,20 +85,20 @@ export class Gfs {
 				total, used, free
 			}
 		})(),
-		(async()=>{
-			const body = pb.encode({
-				3: {
-					1: this.gid,
-					2: 2
+			(async()=>{
+				const body = pb.encode({
+					3: {
+						1: this.gid,
+						2: 2
+					}
+				})
+				const payload = await this.c.sendOidb("OidbSvc.0x6d8_2", body)
+				const rsp = pb.decode(payload)[4][3]
+				const file_count = Number(rsp[4]), max_file_count = Number(rsp[6])
+				return {
+					file_count, max_file_count
 				}
-			})
-			const payload = await this.c.sendOidb("OidbSvc.0x6d8_2", body)
-			const rsp = pb.decode(payload)[4][3]
-			const file_count = Number(rsp[4]), max_file_count = Number(rsp[6])
-			return {
-				file_count, max_file_count
-			}
-		})()])
+			})()])
 		return Object.assign(a, b)
 	}
 
@@ -227,7 +227,7 @@ export class Gfs {
 			})
 			const payload = await this.c.sendOidb("OidbSvc.0x6d6_4", body)
 			rsp = pb.decode(payload)[4][5]
-			
+
 		} else { //rename dir
 			const body = pb.encode({
 				3: {

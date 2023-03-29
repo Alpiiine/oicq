@@ -1,7 +1,7 @@
 import { pb, jce } from "../core"
 import { NOOP, timestamp, OnlineStatus, log } from "../common"
 import { PrivateMessage, GroupMessage, DiscussMessage, genDmMessageId, genGroupMessageId } from "../message"
-import { GroupMessageEvent, DiscussMessageEvent } from "../events"
+import {GroupMessageEvent, DiscussMessageEvent, FriendNoticeEvent, GroupNoticeEvent} from "../events"
 
 type Client = import("../client").Client
 
@@ -49,7 +49,7 @@ const sub0x27: {[k: number]: (this: Client, data: pb.Proto) => OnlinePushEvent |
 		const o = data[12]
 		const gid = o[3]
 		if (!o[4]) return
-			this.gl.get(gid)!.group_name = String(o[2][2])
+		this.gl.get(gid)!.group_name = String(o[2][2])
 	},
 	5: function (data) {
 		const user_id = data[14][1]
@@ -168,24 +168,41 @@ function parsePoke(data: any) {
 	for (let o of data[7]) {
 		const name = String(o[1]), val = String(o[2])
 		switch (name) {
-		case "action_str":
-		case "alt_str1":
-			action = action || val
-			break
-		case "uin_str1":
-			operator_id = parseInt(val)
-			break
-		case "uin_str2":
-			target_id = parseInt(val)
-			break
-		case "suffix_str":
-			suffix = val
-			break
+			case "action_str":
+			case "alt_str1":
+				action = action || val
+				break
+			case "uin_str1":
+				operator_id = parseInt(val)
+				break
+			case "uin_str2":
+				target_id = parseInt(val)
+				break
+			case "suffix_str":
+				suffix = val
+				break
 		}
 	}
 	return { target_id, operator_id, action, suffix }
 }
-
+function parseSign(this:Client,data:any) {
+	let user_id = this.uin, nickname = "", sign_text = "";
+	for (let o of data[7]) {
+		const name = String(o[1]), val = String(o[2]);
+		switch (name) {
+			case "user_sign":
+				sign_text = sign_text || val;
+				break;
+			case "mqq_uin":
+				user_id = parseInt(val);
+				break;
+			case "mqq_nick":
+				nickname = val;
+				break;
+		}
+	}
+	return { user_id, nickname, sign_text };
+}
 // 群事件解析
 const push732: {[k: number]: (this: Client, gid: number, buf: Buffer) => OnlinePushEvent | void} = {
 	0x0C: function (gid, buf) {
@@ -232,6 +249,13 @@ const push732: {[k: number]: (this: Client, gid: number, buf: Buffer) => OnlineP
 				user_id: e.target_id
 			})
 		}
+		const sign = { gid } as any;
+		Object.assign(sign, parseSign.call(this, data));
+		if (sign.sign_text)
+			return {
+				sub_type: 'sign',
+				...sign
+			}
 	},
 	0x0E: function (gid, buf) {
 		if (buf[5] !== 1) return
@@ -253,23 +277,27 @@ const push732: {[k: number]: (this: Client, gid: number, buf: Buffer) => OnlineP
 function emitFriendNoticeEvent(c: Client, uid: number, e: OnlinePushEvent | void) {
 	if (!e) return
 	const name = "notice.friend." + e.sub_type
-	c.em(name, Object.assign({
+	const f= c.pickFriend(uid)
+	const event=Object.assign({
 		post_type: "notice",
 		notice_type: "friend",
 		user_id: uid,
-		friend: c.pickFriend(uid)
-	}, e))
+		friend: f
+	}, e) as FriendNoticeEvent
+	c.em(name, event)
 }
 
 export function emitGroupNoticeEvent(c: Client, gid: number, e: OnlinePushEvent | void) {
 	if (!e) return
 	const name = "notice.group." + e.sub_type
-	c.em(name, Object.assign({
+	const group=c.pickGroup(gid)
+	const event=Object.assign({
 		post_type: "notice",
 		notice_type: "group",
 		group_id: gid,
-		group: c.pickGroup(gid)
-	}, e))
+		group: group
+	}, e) as GroupNoticeEvent
+	c.em(name, event)
 }
 
 export function onlinePushListener(this: Client, payload: Buffer, seq: number) {
@@ -385,8 +413,10 @@ export function groupMsgListener(this: Client, payload: Buffer) {
 	}
 
 	if (msg.raw_message) {
-		msg.group = this.pickGroup(msg.group_id)
-		msg.member = msg.group.pickMember(msg.user_id)
+		const group=this.pickGroup(msg.group_id)
+		const member=group.pickMember(msg.sender.user_id)
+		msg.group = group
+		msg.member = member
 		msg.reply = function (content, quote = false) {
 			return this.group.sendMsg(content, quote ? this : undefined)
 		}

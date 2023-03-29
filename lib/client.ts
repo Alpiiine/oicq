@@ -1,31 +1,54 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as log4js from "log4js"
-import { BaseClient, Platform, pb, generateShortDevice, ShortDevice, Domain } from "./core"
+import { BaseClient, Platform, pb, generateShortDevice, ShortDevice, Domain, ApiRejection } from "./core"
+
 const pkg = require("../package.json")
 import { md5, timestamp, NOOP, lock, Gender, OnlineStatus, hide } from "./common"
-import { bindInternalListeners, parseFriendRequestFlag, parseGroupRequestFlag,
+import {
+	bindInternalListeners, parseFriendRequestFlag, parseGroupRequestFlag,
 	getSysMsg, setAvatar, setSign, setStatus, addClass, delClass, renameClass,
-	loadBL, loadFL, loadGL, loadSL, getStamp, delStamp, imageOcr, OcrResult } from "./internal"
+	loadBL, loadFL, loadGL, loadSL, getStamp, delStamp, imageOcr, loadGPL
+} from "./internal"
 import { StrangerInfo, FriendInfo, GroupInfo, MemberInfo } from "./entities"
-import { EventMap } from "./events"
+import { EventMap, GroupInviteEvent, GroupMessageEvent, PrivateMessageEvent } from "./events"
 import { User, Friend } from "./friend"
 import { Discuss, Group } from "./group"
 import { Member } from "./member"
-import { Forwardable, Quotable, Sendable, parseDmMessageId, parseGroupMessageId, Image, ImageElem} from "./message"
+import {
+	Forwardable,
+	Quotable,
+	Sendable,
+	parseDmMessageId,
+	parseGroupMessageId,
+	Image,
+	ImageElem,
+} from "./message"
+import { Listener, Matcher, ToDispose } from "triptrap";
+import { Guild } from "./guild";
+import { drop, ErrorCode } from "./errors";
 
 /** 事件接口 */
 export interface Client extends BaseClient {
-	on<T extends keyof EventMap>(event: T, listener: EventMap<this>[T]): this
-	on<S extends string | symbol>(event: S & Exclude<S, keyof EventMap>, listener: (this: this, ...args: any[]) => void): this
-	once<T extends keyof EventMap>(event: T, listener: EventMap<this>[T]): this
-	once<S extends string | symbol>(event: S & Exclude<S, keyof EventMap>, listener: (this: this, ...args: any[]) => void): this
-	prependListener<T extends keyof EventMap>(event: T, listener: EventMap<this>[T]): this
-	prependListener(event: string | symbol, listener: (this: this, ...args: any[]) => void): this
-	prependOnceListener<T extends keyof EventMap>(event: T, listener: EventMap<this>[T]): this
-	prependOnceListener(event: string | symbol, listener: (this: this, ...args: any[]) => void): this
-	off<T extends keyof EventMap>(event: T, listener: EventMap<this>[T]): this
-	off<S extends string | symbol>(event: S & Exclude<S, keyof EventMap>, listener: (this: this, ...args: any[]) => void): this
+	on<T extends keyof EventMap>(event: T, listener: EventMap[T]): ToDispose<this>
+
+	on<S extends Matcher>(event: S & Exclude<S, keyof EventMap>, listener: Listener): ToDispose<this>
+
+	trap<T extends keyof EventMap>(event: T, listener: EventMap[T]): ToDispose<this>
+
+	trap<S extends Matcher>(event: S & Exclude<S, keyof EventMap>, listener: Listener): ToDispose<this>
+
+	trip<E extends keyof EventMap>(event: E, ...args: Parameters<EventMap[E]>): boolean
+
+	trip<S extends string | symbol>(event: S & Exclude<S, keyof EventMap>, ...args: any[]): boolean
+
+	trapOnce<T extends keyof EventMap>(event: T, listener: EventMap[T]): ToDispose<this>
+
+	trapOnce<S extends Matcher>(event: S & Exclude<S, keyof EventMap>, listener: Listener): ToDispose<this>
+
+	off<T extends keyof EventMap>(event: T): void
+
+	off<S extends Matcher>(event: S & Exclude<S, keyof EventMap>): void
 }
 
 /** 一个客户端 */
@@ -44,9 +67,9 @@ export class Client extends BaseClient {
 	readonly pickUser = User.as.bind(this)
 	/** 创建一个讨论组对象 */
 	readonly pickDiscuss = Discuss.as.bind(this)
+	readonly pickGuild = Guild.as.bind(this)
 
 	/** 日志记录器，初始情况下是`log4js.Logger` */
-	logger: Logger | log4js.Logger
 	/** 账号本地数据存储目录 */
 	readonly dir: string
 	/** 配置 */
@@ -70,6 +93,8 @@ export class Client extends BaseClient {
 	readonly gl = new Map<number, GroupInfo>()
 	/** 群员列表缓存(务必以`ReadonlyMap`方式访问) */
 	readonly gml = new Map<number, Map<number, MemberInfo>>()
+	/** 我加入的频道列表 */
+	readonly guilds = new Map<string, Guild>()
 	/** 黑名单列表(务必以`ReadonlySet`方式访问) */
 	readonly blacklist = new Set<number>()
 	/** 好友分组 */
@@ -94,7 +119,8 @@ export class Client extends BaseClient {
 		bkn &= 2147483647
 		return bkn
 	}
-	readonly cookies: {[domain in Domain]: string} = new Proxy(this.pskey, {
+
+	readonly cookies: { [domain in Domain]: string } = new Proxy(this.pskey, {
 		get: (obj: any, domain: string) => {
 			const cookie = `uin=o${this.uin}; skey=${this.sig.skey};`
 			if (!obj[domain])
@@ -105,6 +131,7 @@ export class Client extends BaseClient {
 			return false
 		}
 	})
+
 	/** 数据统计 */
 	get stat() {
 		this.statistics.msg_cnt_per_min = this._calcMsgCntPerMin()
@@ -117,8 +144,7 @@ export class Client extends BaseClient {
 		this.config.log_level = level
 	}
 
-	//@ts-ignore ts2376??
-	constructor(uin: number, conf?: Config) {
+	constructor(conf?: Config) {
 
 		const config = {
 			log_level: "info" as LogLevel,
@@ -131,34 +157,31 @@ export class Client extends BaseClient {
 			data_dir: path.join(require?.main?.path || process.cwd(), "data"),
 			...conf,
 		}
-
-		const dir = createDataDir(config.data_dir, uin)
-		const file = path.join(dir, `device-${uin}.json`)
+		const dir = path.resolve(config.data_dir)
+		createDataDir(dir)
+		const file = path.join(dir, `device.json`)
+		let device: ShortDevice, isNew: boolean = false
 		try {
-			var device = require(file) as ShortDevice
-			var _ = false
+			device = require(file) as ShortDevice
 		} catch {
-			var device = generateShortDevice(uin)
-			var _ = true
+			device = generateShortDevice()
+			isNew = true
 			fs.writeFile(file, JSON.stringify(device, null, 2), NOOP)
 		}
-
-		super(uin, config.platform, device)
-
-		this.logger = log4js.getLogger(`[${this.apk.display}:${uin}]`)
-		;(this.logger as log4js.Logger).level = config.log_level
-		if (_)
+		super(config.platform, device);
+		this.logger.level = config.log_level
+		if (isNew)
 			this.logger.mark("创建了新的设备文件：" + file)
 		this.logger.mark("----------")
-		this.logger.mark(`Package Version: oicq@${pkg.version} (Released on ${pkg.upday})`)
-		this.logger.mark("View Changelogs：https://github.com/takayama-lily/oicq/releases")
+		this.logger.mark(`Package Version: icqq@${pkg.version} (Released on ${pkg.upday})`)
+		this.logger.mark("View Changelogs：https://github.com/icqqjs/icqq/releases")
 		this.logger.mark("----------")
 
 		this.dir = dir
 		this.config = config as Required<Config>
 		bindInternalListeners.call(this)
-		this.on("internal.verbose", (verbose, level) => {
-			const list: Exclude<LogLevel, "off">[] = ["fatal", "mark", "error", "warn", "info", "trace"]
+		this.on("internal.verbose", (verbose, level, c) => {
+			const list: Exclude<LogLevel, "off">[] = ["fatal", "mark", "error", "warn", "info", "debug", "trace"]
 			this.logger[list[level]](verbose)
 		})
 		lock(this, "dir")
@@ -193,18 +216,26 @@ export class Client extends BaseClient {
 	}
 
 	/**
-	 * 会优先尝试使用token登录 (token在上次登录成功后存放在`this.dir`下)
+	 * 传了uin 未传password
+	 * 会优先尝试使用token登录 (token在上次登录成功后存放在`this.dir`的`${uin}_token`中)
 	 *
-	 * 无token或token失效时：
+	 * 传了uin无token或token失效时：
 	 * * 传了`password`则尝试密码登录
 	 * * 不传`password`则尝试扫码登录
+	 *
+	 * 未传任何参数 则尝试扫码登录
 	 *
 	 * 掉线重连时也是自动调用此函数，走相同逻辑
 	 * 你也可以在配置中修改`reconn_interval`，关闭掉线重连并自行处理
 	 *
+	 * @param uin number，登录账号
 	 * @param password 可以为密码原文，或密码的md5值
 	 */
-	async login(password?: string | Buffer) {
+	async login(uin = this.uin, password?: string | Buffer) {
+		if (!this.device.qImei36 || !this.device.qImei16) {
+			await this.device.getQIMEI()
+		}
+
 		if (password && password.length > 0) {
 			let md5pass
 			if (typeof password === "string")
@@ -216,11 +247,13 @@ export class Client extends BaseClient {
 			this.password_md5 = md5pass
 		}
 		try {
-			const token = await fs.promises.readFile(path.join(this.dir, "token"))
+			if (!uin) throw new Error()
+			this.uin = uin
+			const token = await fs.promises.readFile(path.join(this.dir, uin + '_token'))
 			return this.tokenLogin(token)
-		} catch {
-			if (this.password_md5)
-				return this.passwordLogin(this.password_md5)
+		} catch (e) {
+			if (this.password_md5 && uin)
+				return await this.passwordLogin(uin as number, this.password_md5)
 			else
 				return this.sig.qrsig.length ? this.qrcodeLogin() : this.fetchQrcode()
 		}
@@ -230,14 +263,17 @@ export class Client extends BaseClient {
 	setOnlineStatus(status = this.status || OnlineStatus.Online) {
 		return setStatus.call(this, status)
 	}
+
 	/** 设置昵称 */
 	async setNickname(nickname: string) {
 		return this._setProfile(0x14E22, Buffer.from(String(nickname)))
 	}
+
 	/** 设置性别(1男2女) */
 	async setGender(gender: 0 | 1 | 2) {
 		return this._setProfile(0x14E29, Buffer.from([gender]))
 	}
+
 	/** 设置生日(20201202) */
 	async setBirthday(birthday: string | number) {
 		const birth = String(birthday).replace(/[^\d]/g, "")
@@ -247,77 +283,100 @@ export class Client extends BaseClient {
 		buf[3] = Number(birth.substr(6, 2))
 		return this._setProfile(0x16593, buf)
 	}
+
 	/** 设置个人说明 */
 	async setDescription(description = "") {
 		return this._setProfile(0x14E33, Buffer.from(String(description)))
 	}
+
 	/** 设置个性签名 */
 	async setSignature(signature = "") {
 		return setSign.call(this, signature)
 	}
+
 	/** 设置头像 */
 	async setAvatar(file: ImageElem["file"]) {
 		return setAvatar.call(this, new Image({ type: "image", file }))
 	}
+
 	/** 获取漫游表情 */
 	getRoamingStamp(no_cache = false) {
 		return getStamp.call(this, no_cache)
 	}
+
 	/** 删除表情(支持批量) */
 	deleteStamp(id: string | string[]) {
 		return delStamp.call(this, id)
 	}
+
 	/** 获取系统消息 */
 	getSystemMsg() {
 		return getSysMsg.call(this)
 	}
+
 	/** 添加好友分组 */
 	addClass(name: string) {
 		return addClass.call(this, name)
 	}
+
 	/** 删除好友分组 */
 	deleteClass(id: number) {
 		return delClass.call(this, id)
 	}
+
 	/** 重命名好友分组 */
 	renameClass(id: number, name: string) {
 		return renameClass.call(this, id, name)
 	}
+
 	/** 重载好友列表 */
 	reloadFriendList() {
 		return loadFL.call(this)
 	}
+
 	/** 重载陌生人列表 */
 	reloadStrangerList() {
 		return loadSL.call(this)
 	}
+
+	/** 重新加载频道列表 */
+	reloadGuilds(): Promise<void> {
+		return loadGPL.call(this)
+	}
+
 	/** 重载群列表 */
 	reloadGroupList() {
 		return loadGL.call(this)
 	}
+
 	/** 重载黑名单 */
 	reloadBlackList() {
 		return loadBL.call(this)
 	}
+
 	/** 清空缓存文件 fs.rm need v14.14 */
 	cleanCache() {
-		const dir = path.join(this.dir, "../image")
+		const dir = path.join(this.dir, "image")
 		fs.rm?.(dir, { recursive: true }, () => {
 			fs.mkdir(dir, NOOP)
 		})
 	}
+
 	/** 获取视频下载地址 */
 	getVideoUrl(fid: string, md5: string | Buffer) {
 		return this.pickFriend(this.uin).getVideoUrl(fid, md5)
 	}
+
 	/** 获取转发消息 */
 	getForwardMsg(resid: string, fileName?: string) {
 		return this.pickFriend(this.uin).getForwardMsg(resid, fileName)
 	}
+
 	/** 制作转发消息 */
 	makeForwardMsg(fake: Forwardable[], dm = false) {
 		return (dm ? this.pickFriend : this.pickGroup)(this.uin).makeForwardMsg(fake)
 	}
+
 	/** Ocr图片转文字 */
 	imageOcr(file: ImageElem["file"]) {
 		return imageOcr.call(this, new Image({ type: "image", file }))
@@ -327,58 +386,128 @@ export class Client extends BaseClient {
 	getCookies(domain: Domain = "") {
 		return this.cookies[domain]
 	}
+
 	/** @cqhttp use client.bkn */
 	getCsrfToken() {
 		return this.bkn
 	}
+
 	/** @cqhttp use client.fl */
 	getFriendList() {
 		return this.fl
 	}
+
 	/** @cqhttp use client.gl */
 	getGroupList() {
 		return this.gl
 	}
+
+	getGuildList() {
+		return [...this.guilds.values()].map(guild => {
+			return {
+				guild_id: guild.guild_id,
+				guild_name: guild.guild_name
+			}
+		})
+	}
+
+	/**
+	 * 加精群消息
+	 * @param message_id {string}
+	 */
+	async setEssenceMessage(message_id: string) {
+		if (message_id.length <= 24) throw new ApiRejection(ErrorCode.MessageBuilderError, '只能加精群消息')
+		const { group_id, seq, rand } = parseGroupMessageId(message_id)
+		return this.pickGroup(group_id).addEssence(seq, rand)
+	}
+
+	/**
+	 * 移除群精华消息
+	 * @param message_id
+	 */
+	async removeEssenceMessage(message_id: string) {
+		if (message_id.length <= 24) throw new ApiRejection(ErrorCode.MessageBuilderError, '消息id无效')
+		const { group_id, seq, rand } = parseGroupMessageId(message_id)
+		return this.pickGroup(group_id).removeEssence(seq, rand)
+	}
+
+	getChannelList(guild_id: string) {
+		const guild = this.guilds.get(guild_id)
+		if (!guild) return []
+		return [...guild.channels.values()].map(channel => {
+			return {
+				guild_id,
+				channel_id: channel.channel_id,
+				channel_name: channel.channel_name,
+				channel_type: channel.channel_type
+			}
+		})
+	}
+
+	getGuildMemberList(guild_id: string) {
+		const guild = this.guilds.get(guild_id)
+		if (!guild) return []
+		return guild.getMemberList()
+	}
+
 	/** @cqhttp use client.sl */
 	getStrangerList() {
 		return this.sl
 	}
+
 	/** @cqhttp use user.getSimpleInfo() */
 	async getStrangerInfo(user_id: number) {
 		return this.pickUser(user_id).getSimpleInfo()
 	}
+
 	/** @cqhttp use group.info or group.renew() */
 	async getGroupInfo(group_id: number, no_cache = false) {
 		const group = this.pickGroup(group_id)
 		if (no_cache) return group.renew()
 		return group.info || group.renew()
 	}
+
 	/** @cqhttp use group.getMemberList() */
 	async getGroupMemberList(group_id: number, no_cache = false) {
 		return this.pickGroup(group_id).getMemberMap(no_cache)
 	}
+
 	/** @cqhttp use member.info or member.renew() */
 	async getGroupMemberInfo(group_id: number, user_id: number, no_cache = false) {
 		if (no_cache || !this.gml.get(group_id)?.has(user_id))
 			return this.pickMember(group_id, user_id).renew()
 		return this.gml.get(group_id)?.get(user_id)!
 	}
+
 	/** @cqhttp use friend.sendMsg() */
 	async sendPrivateMsg(user_id: number, message: Sendable, source?: Quotable) {
 		return this.pickFriend(user_id).sendMsg(message, source)
 	}
+
+	async sendGuildMsg(guild_id: string, channel_id: string, message: Sendable) {
+		return this.pickGuild(guild_id).sendMsg(channel_id, message)
+	}
+
 	/** @cqhttp use group.sendMsg() */
 	async sendGroupMsg(group_id: number, message: Sendable, source?: Quotable) {
 		return this.pickGroup(group_id).sendMsg(message, source)
 	}
+
+	/** @cqhttp use group.sign() */
+	async sendGroupSign(group_id: number) {
+		return this.pickGroup(group_id).sign()
+	}
+
 	/** @cqhttp use discuss.sendMsg() */
 	async sendDiscussMsg(discuss_id: number, message: Sendable, source?: Quotable) {
 		return this.pickDiscuss(discuss_id).sendMsg(message)
 	}
+
 	/** @cqhttp use member.sendMsg() */
 	async sendTempMsg(group_id: number, user_id: number, message: Sendable) {
 		return this.pickMember(group_id, user_id).sendMsg(message)
 	}
+
 	/** @cqhttp use user.recallMsg() or group.recallMsg() */
 	async deleteMsg(message_id: string) {
 		if (message_id.length > 24) {
@@ -389,6 +518,7 @@ export class Client extends BaseClient {
 			return this.pickUser(user_id).recallMsg(seq, rand, time)
 		}
 	}
+
 	/** @cqhttp use user.markRead() or group.markRead() */
 	async reportReaded(message_id: string) {
 		if (message_id.length > 24) {
@@ -399,10 +529,12 @@ export class Client extends BaseClient {
 			return this.pickUser(user_id).markRead(time)
 		}
 	}
+
 	/** @cqhttp use user.getChatHistory() or group.getChatHistory() */
 	async getMsg(message_id: string) {
 		return (await this.getChatHistory(message_id, 1)).pop()
 	}
+
 	/** @cqhttp use user.getChatHistory() or group.getChatHistory() */
 	async getChatHistory(message_id: string, count = 20) {
 		if (message_id.length > 24) {
@@ -413,88 +545,109 @@ export class Client extends BaseClient {
 			return this.pickUser(user_id).getChatHistory(time, count)
 		}
 	}
+
 	/** @cqhttp use group.muteAnony() */
 	async setGroupAnonymousBan(group_id: number, flag: string, duration = 1800) {
 		return this.pickGroup(group_id).muteAnony(flag, duration)
 	}
+
 	/** @cqhttp use group.allowAnony() */
 	async setGroupAnonymous(group_id: number, enable = true) {
 		return this.pickGroup(group_id).allowAnony(enable)
 	}
+
 	/** @cqhttp use group.muteAll() */
 	async setGroupWholeBan(group_id: number, enable = true) {
 		return this.pickGroup(group_id).muteAll(enable)
 	}
+
 	/** @cqhttp use group.setName() */
 	async setGroupName(group_id: number, name: string) {
 		return this.pickGroup(group_id).setName(name)
 	}
+
 	/** @cqhttp use group.announce() */
 	async sendGroupNotice(group_id: number, content: string) {
 		return this.pickGroup(group_id).announce(content)
 	}
+
 	/** @cqhttp use group.setAdmin() or member.setAdmin() */
 	async setGroupAdmin(group_id: number, user_id: number, enable = true) {
 		return this.pickMember(group_id, user_id).setAdmin(enable)
 	}
+
 	/** @cqhttp use group.setSpecialTitle() or member.setSpecialTitle() */
 	async setGroupSpecialTitle(group_id: number, user_id: number, special_title: string, duration = -1) {
 		return this.pickMember(group_id, user_id).setTitle(special_title, duration)
 	}
+
 	/** @cqhttp use group.setCard() or member.setCard() */
 	async setGroupCard(group_id: number, user_id: number, card: string) {
 		return this.pickMember(group_id, user_id).setCard(card)
 	}
+
 	/** @cqhttp use group.kickMember() or member.kick() */
-	async setGroupKick(group_id: number, user_id: number, reject_add_request = false) {
-		return this.pickMember(group_id, user_id).kick(reject_add_request)
+	async setGroupKick(group_id: number, user_id: number, reject_add_request = false, message?: string) {
+		return this.pickMember(group_id, user_id).kick(message, reject_add_request)
 	}
+
 	/** @cqhttp use group.muteMember() or member.mute() */
 	async setGroupBan(group_id: number, user_id: number, duration = 1800) {
 		return this.pickMember(group_id, user_id).mute(duration)
 	}
+
 	/** @cqhttp use group.quit() */
 	async setGroupLeave(group_id: number) {
 		return this.pickGroup(group_id).quit()
 	}
+
 	/** @cqhttp use group.pokeMember() or member.poke() */
 	async sendGroupPoke(group_id: number, user_id: number) {
 		return this.pickMember(group_id, user_id).poke()
 	}
+
 	/** @cqhttp use member.addFriend() */
 	async addFriend(group_id: number, user_id: number, comment = "") {
 		return this.pickMember(group_id, user_id).addFriend(comment)
 	}
+
 	/** @cqhttp use friend.delete() */
 	async deleteFriend(user_id: number, block = true) {
 		return this.pickFriend(user_id).delete(block)
 	}
+
 	/** @cqhttp use group.invite() */
 	async inviteFriend(group_id: number, user_id: number) {
 		return this.pickGroup(group_id).invite(user_id)
 	}
+
 	/** @cqhttp use friend.thumbUp() */
 	async sendLike(user_id: number, times = 1) {
 		return this.pickFriend(user_id).thumbUp(times)
 	}
+
 	/** @cqhttp user client.setAvatar() */
 	async setPortrait(file: Parameters<Client["setAvatar"]>[0]) {
 		return this.setAvatar(file)
 	}
+
 	/** @cqhttp use group.setAvatar() */
 	async setGroupPortrait(group_id: number, file: Parameters<Group["setAvatar"]>[0]) {
 		return this.pickGroup(group_id).setAvatar(file)
 	}
+
 	/** @cqhttp use group.fs */
 	acquireGfs(group_id: number) {
 		return this.pickGroup(group_id).fs
 	}
+
 	/** @cqhttp use user.setFriendReq() or user.addFriendBack() */
 	async setFriendAddRequest(flag: string, approve = true, remark = "", block = false) {
 		const { user_id, seq, single } = parseFriendRequestFlag(flag)
 		const user = this.pickUser(user_id)
 		return single ? user.addFriendBack(seq, remark) : user.setFriendReq(seq, approve, remark, block)
 	}
+
 	/** @cqhttp use user.setGroupInvite() or user.setGroupReq() */
 	async setGroupAddRequest(flag: string, approve = true, reason = "", block = false) {
 		const { group_id, user_id, seq, invite } = parseGroupRequestFlag(flag)
@@ -502,26 +655,25 @@ export class Client extends BaseClient {
 		return invite ? user.setGroupInvite(group_id, seq, approve, block) : user.setGroupReq(group_id, seq, approve, reason, block)
 	}
 
-	/** dont use it if not clear the usage */
-	sendOidb(cmd: string, body: Uint8Array, timeout = 5) {
-		const sp = cmd //OidbSvc.0x568_22
-			.replace("OidbSvc.", "")
-			.replace("oidb_", "")
-			.split("_")
-		const type1 = parseInt(sp[0], 16), type2 = parseInt(sp[1])
-		body = pb.encode({
-			1: type1,
-			2: isNaN(type2) ? 1 : type2,
-			3: 0,
-			4: body,
-			6: "android " + this.apk.ver,
-		})
-		return this.sendUni(cmd, body, timeout)
+	group(...group_ids: number[]) {
+		return (listener: (event: GroupInviteEvent | GroupMessageEvent) => void) => {
+			return this.trap((eventName, event) => {
+				return group_ids.includes(event.group_id)
+			}, listener)
+		}
+	}
+
+	user(...user_ids: number[]) {
+		return (listener: (event: PrivateMessageEvent | GroupMessageEvent) => void) => {
+			return this.trap((eventName, event) => {
+				return user_ids.includes(event.user_id)
+			}, listener)
+		}
 	}
 
 	/** emit an event */
 	em(name = "", data?: any) {
-		data = Object.defineProperty(data || { }, "self_id", {
+		data = Object.defineProperty(data || {}, "self_id", {
 			value: this.uin,
 			writable: true,
 			enumerable: true,
@@ -580,29 +732,21 @@ export class Client extends BaseClient {
 	sliderLogin(ticket: string) {
 		return this.submitSlider(ticket)
 	}
+
 	/** @deprecated use client.sendSmsCode() */
 	sendSMSCode() {
 		return this.sendSmsCode()
 	}
+
 	/** @deprecated use client.submitSmsCode() */
 	submitSMSCode(code: string) {
 		return this.submitSmsCode(code)
 	}
+
 	/** @deprecated use client.status */
 	get online_status() {
 		return this.status
 	}
-}
-
-/** 日志记录器接口 */
-export interface Logger {
-	trace(msg: any, ...args: any[]): any
-	debug(msg: any, ...args: any[]): any
-	info(msg: any, ...args: any[]): any
-	warn(msg: any, ...args: any[]): any
-	error(msg: any, ...args: any[]): any
-	fatal(msg: any, ...args: any[]): any
-	mark(msg: any, ...args: any[]): any
 }
 
 /** 日志等级 */
@@ -637,21 +781,15 @@ export interface Config {
 /** 数据统计 */
 export type Statistics = Client["stat"]
 
-function createDataDir(dir: string, uin: number) {
+function createDataDir(dir: string) {
 	if (!fs.existsSync(dir))
 		fs.mkdirSync(dir, { mode: 0o755, recursive: true })
 	const img_path = path.join(dir, "image")
-	const uin_path = path.join(dir, String(uin))
 	if (!fs.existsSync(img_path))
 		fs.mkdirSync(img_path)
-	if (!fs.existsSync(uin_path))
-		fs.mkdirSync(uin_path, { mode: 0o755 })
-	return uin_path
 }
 
 /** 创建一个客户端 (=new Client) */
-export function createClient(uin: number, config?: Config) {
-	if (isNaN(Number(uin)))
-		throw new Error(uin + " is not an OICQ account")
-	return new Client(Number(uin), config)
+export function createClient(config?: Config) {
+	return new Client(config)
 }

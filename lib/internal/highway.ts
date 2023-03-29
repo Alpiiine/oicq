@@ -1,11 +1,11 @@
 import * as stream from "stream"
 import * as net from "net"
-import { randomBytes } from "crypto"
+import {randomBytes} from "crypto"
 import http from "http"
-import axios, { CancelTokenSource } from "axios"
-import { tea, pb, ApiRejection } from "../core"
-import { ErrorCode } from "../errors"
-import { md5, NOOP, BUF0, int32ip2str, log } from "../common"
+import axios, {CancelTokenSource} from "axios"
+import {tea, pb, ApiRejection} from "../core"
+import {ErrorCode} from "../errors"
+import {md5, NOOP, BUF0, int32ip2str, log} from "../common"
 
 type Client = import("../client").Client
 
@@ -35,6 +35,7 @@ export interface HighwayUploadExt {
 }
 
 const __ = Buffer.from([41])
+
 class HighwayTransform extends stream.Transform {
 
 	seq = randomBytes(2).readUInt16BE()
@@ -90,7 +91,7 @@ class HighwayTransform extends stream.Transform {
 }
 
 /** highway上传数据 (只能上传流) */
-export function highwayUpload(this: Client, readable: stream.Readable, obj: HighwayUploadExt, ip?: string | number, port?: number): Promise<pb.Proto | void> {
+export function highwayUpload(this: Client, readable: stream.Readable, obj: HighwayUploadExt, ip?: string | number, port?: number): Promise<pb.Proto> {
 	ip = int32ip2str(ip || this.sig.bigdata.ip)
 	port = port || this.sig.bigdata.port
 	if (!port) throw new ApiRejection(ErrorCode.NoUploadChannel, "没有上传通道，如果你刚刚登录，请等待几秒")
@@ -100,7 +101,9 @@ export function highwayUpload(this: Client, readable: stream.Readable, obj: High
 		const highway = new HighwayTransform(this, obj)
 		const socket = net.connect(
 			port as number, ip as string,
-			() => { readable.pipe(highway).pipe(socket, { end: false }) }
+			() => {
+				readable.pipe(highway).pipe(socket, {end: false})
+			}
 		)
 		const handleRspHeader = (header: Buffer) => {
 			const rsp = pb.decode(header)
@@ -157,7 +160,7 @@ export function highwayUpload(this: Client, readable: stream.Readable, obj: High
 	})
 }
 
-const agent = new http.Agent({ maxSockets: 10 })
+const agent = new http.Agent({maxSockets: 10})
 
 export function highwayHttpUpload(this: Client, readable: stream.Readable, obj: HighwayUploadExt) {
 	const ip = this.sig.bigdata.ip
@@ -171,6 +174,7 @@ export function highwayHttpUpload(this: Client, readable: stream.Readable, obj: 
 	obj.ticket = this.sig.bigdata.sig_session
 
 	const tasks = new Set<Promise<any>>()
+	const controller = new AbortController();
 	const cancels = new Set<CancelTokenSource>()
 	let finished = 0
 
@@ -216,7 +220,8 @@ export function highwayHttpUpload(this: Client, readable: stream.Readable, obj: 
 					httpAgent: agent,
 					cancelToken: c.token,
 					headers: {
-						"Content-Length": String(buf.length)
+						"Content-Length": String(buf.length),
+						"Content-Type": "application/octet-stream"
 					}
 				}).then(r => {
 					let percentage, rsp
@@ -230,6 +235,7 @@ export function highwayHttpUpload(this: Client, readable: stream.Readable, obj: 
 						return
 					}
 					if (rsp?.[3] !== 0) {
+						controller.abort()
 						reject(new ApiRejection(rsp[3], "unknown highway error"))
 						return
 					}
@@ -256,14 +262,14 @@ export function highwayHttpUpload(this: Client, readable: stream.Readable, obj: 
 
 	return new Promise((resolve, reject) => {
 		readable.on("err", reject)
-		.on("end", () => {
-			Promise.all(tasks).then(resolve).catch(err => {
-				if (err instanceof axios.Cancel === false) {
-					cancels.forEach(c => c.cancel())
-					reject(err)
-				}
-				resolve(undefined)
+			.on("end", () => {
+				Promise.all(tasks).then(resolve).catch(err => {
+					if (err instanceof axios.Cancel === false) {
+						cancels.forEach(c => c.cancel())
+						reject(err)
+					}
+					resolve(undefined)
+				})
 			})
-		})
 	})
 }
