@@ -243,12 +243,15 @@ export class Client extends BaseClient {
 	async login(uin = this.uin, password?: string | Buffer) {
 		if (password && password.length > 0) {
 			let md5pass
-			if (typeof password === "string")
+			if (typeof password === "string"){
 				md5pass = Buffer.from(password, "hex")
-			else
+			}
+			else {
 				md5pass = password
-			if (md5pass.length !== 16)
+			}
+			if (md5pass.length !== 16) {
 				md5pass = md5(String(password))
+			}
 			this.password_md5 = md5pass
 			this.logger.mark(`md5pass: ${md5pass}, password_md5: ${this.password_md5}`)
 		} else {
