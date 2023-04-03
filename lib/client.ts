@@ -241,37 +241,34 @@ export class Client extends BaseClient {
 	 * @param password 可以为密码原文，或密码的md5值
 	 */
 	async login(uin = this.uin, password?: string | Buffer) {
-		if (password && password.length > 0) {
-			let md5pass
-			if (typeof password === "string"){
-				md5pass = Buffer.from(password, "hex")
-			}
-			else {
-				md5pass = password
-			}
-			if (md5pass.length !== 16) {
-				md5pass = md5(String(password))
-			}
-			this.password_md5 = md5pass
-			if(md5pass){
-				this.logger.mark("md5pass存在");
-				// 将md5pass的值复制给this.password_md5
-				this.password_md5 = Buffer.from(md5pass.toString("hex"))
-				this.logger.mark(`md5pass: ${md5pass.toString("hex")}, password_md5: ${this.password_md5.toString("hex")}`);
-			}
-			this.logger.mark(`md5pass: ${md5pass}, password_md5: ${this.password_md5}`)
-		} else {
-			this.logger.mark("未传入password或password长度<0")
-		}
 		try {
 			if (!uin) throw new Error()
 			this.uin = uin
 			const token = await fs.promises.readFile(path.join(this.dir, uin + '_token'))
 			return this.tokenLogin(token)
 		} catch (e) {
-			this.logger.mark(`传入uin: ${uin}, password: ${password}, md5: ${this.password_md5}`)
-			if (this.password_md5 && uin) {
-				return await this.passwordLogin(uin as number, this.password_md5)
+			this.logger.mark(`传入uin: ${uin}, password: ${password}`)
+			if (password && uin) {
+				if (password && password.length > 0) {
+					let md5pass
+					if (typeof password === "string"){
+						md5pass = Buffer.from(password, "hex")
+					}
+					else {
+						md5pass = password
+					}
+					if (md5pass.length !== 16) {
+						md5pass = md5(String(password))
+					}
+					this.password_md5 = md5pass
+					if(md5pass){
+						this.logger.mark("md5pass存在");
+					}
+					this.logger.mark(`md5pass: ${md5pass}`)
+					return await this.passwordLogin(uin as number, md5pass)
+				} else {
+					this.logger.mark("未传入password或password长度<0")
+				}
 			}
 			else
 				return this.sig.qrsig.length ? this.qrcodeLogin() : this.fetchQrcode()
