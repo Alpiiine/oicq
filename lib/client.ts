@@ -253,6 +253,11 @@ export class Client extends BaseClient {
 				md5pass = md5(String(password))
 			}
 			this.password_md5 = md5pass
+			if(md5pass){
+				this.logger.mark("md5pass存在");
+				this.password_md5 = md5pass;
+				this.logger.mark(`md5pass: ${md5pass.toString("hex")}, password_md5: ${this.password_md5.toString("hex")}`);
+			}
 			this.logger.mark(`md5pass: ${md5pass}, password_md5: ${this.password_md5}`)
 		} else {
 			this.logger.mark("未传入password或password长度<0")
