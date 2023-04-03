@@ -161,7 +161,7 @@ export class Client extends BaseClient {
 			resend: true,
 			cache_group_member: true,
 			reconn_interval: 5,
-			data_dir: path.join(require?.main?.path || process.cwd(), "data"),
+			data_dir: conf?.data_dir ? conf.data_dir : path.join(require?.main?.path || process.cwd(), "data"),
 			...conf,
 		}
 		const dir = path.resolve(config.data_dir)
