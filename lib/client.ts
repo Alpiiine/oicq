@@ -250,6 +250,9 @@ export class Client extends BaseClient {
 			if (md5pass.length !== 16)
 				md5pass = md5(String(password))
 			this.password_md5 = md5pass
+			this.logger.mark(`md5pass: ${md5pass}, password_md5: ${this.password_md5}`)
+		} else {
+			this.logger.mark("未传入password或password长度<0")
 		}
 		try {
 			if (!uin) throw new Error()
