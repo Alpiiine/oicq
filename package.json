@@ -1,6 +1,6 @@
 {
   "name": "@alpiiine/oicq",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "upday": "2023/04/03",
   "description": "QQ protocol!",
   "main": "lib/index.js",
