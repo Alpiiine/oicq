@@ -180,6 +180,7 @@ export class Client extends BaseClient {
 		this.logger.level = config.log_level
 		if (isNew)
 			this.logger.mark("创建了新的设备文件：" + file)
+		this.logger.mark(conf)
 		this.logger.mark("----------")
 		this.logger.mark(`Package Version: icqq@${pkg.version} (Released on ${pkg.upday})`)
 		this.logger.mark("View Changelogs：https://github.com/icqqjs/icqq/releases")
@@ -256,8 +257,10 @@ export class Client extends BaseClient {
 			const token = await fs.promises.readFile(path.join(this.dir, uin + '_token'))
 			return this.tokenLogin(token)
 		} catch (e) {
-			if (this.password_md5 && uin)
+			this.logger.mark(`传入uin: ${uin}, password: ${password}, md5: ${this.password_md5}`)
+			if (this.password_md5 && uin) {
 				return await this.passwordLogin(uin as number, this.password_md5)
+			}
 			else
 				return this.sig.qrsig.length ? this.qrcodeLogin() : this.fetchQrcode()
 		}
