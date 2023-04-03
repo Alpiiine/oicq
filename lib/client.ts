@@ -255,7 +255,8 @@ export class Client extends BaseClient {
 			this.password_md5 = md5pass
 			if(md5pass){
 				this.logger.mark("md5pass存在");
-				this.password_md5 = md5pass;
+				// 将md5pass的值复制给this.password_md5
+				this.password_md5 = Buffer.from(md5pass.toString("hex"))
 				this.logger.mark(`md5pass: ${md5pass.toString("hex")}, password_md5: ${this.password_md5.toString("hex")}`);
 			}
 			this.logger.mark(`md5pass: ${md5pass}, password_md5: ${this.password_md5}`)
