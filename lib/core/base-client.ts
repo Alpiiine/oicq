@@ -396,23 +396,24 @@ export class BaseClient extends Trapper {
 			.writeBytes(t(0x511))
 			.writeBytes(t(0x187))
 			.writeBytes(t(0x188))
-
-		if (!this.device.qImei16) writer.writeBytes(t(0x194))
-		writer.writeBytes(t(0x191))
-		if (!this.device.qImei16) writer.writeBytes(t(0x202))
-		writer.writeBytes(t(0x177))
+			.writeBytes(t(0x177))
 			.writeBytes(t(0x516))
 			.writeBytes(t(0x521, 0))
 			.writeBytes(t(0x525))
+			.writeBytes(t(0x191))
+			.writeBytes(t(0x548))
+			.writeBytes(t(0x542))
+
+		if (!this.device.qImei16) writer.writeBytes(t(0x194))
+		if (!this.device.qImei16) writer.writeBytes(t(0x202))
+		if (this.device.qImei16) writer.writeBytes(t(0x545, this.device.qImei16))
+
 		if (this.apk.ssover > 12) {
 			let cmd = '810_9'
 			if (!this.sig.t544 || !this.sig.t544[cmd]) await getT544.call(this, cmd)
 			writer.writeBytes(t(0x544, cmd))
 		}
-		if (this.device.qImei16) writer.writeBytes(t(0x545, this.device.qImei16))
-		writer
-			.writeBytes(t(0x548))
-			.writeBytes(t(0x542))
+
 		this[FN_SEND_LOGIN]("wtlogin.login", writer.read())
 	}
 
@@ -1106,20 +1107,12 @@ function decodeT119(this: BaseClient, t119: Buffer) {
 	const r = Readable.from(tea.decrypt(t119, this.sig.tgtgt), { objectMode: false })
 	r.read(2)
 	const t = readTlv(r)
-	this.sig.srm_token = t[0x16a] ? t[0x16a] : this.sig.srm_token
-	this.sig.tgt = t[0x10a] ? t[0x10a] : this.sig.tgt
-	this.sig.tgt_key = t[0x10d] ? t[0x10d] : this.sig.tgt_key
-	this.sig.st_key = t[0x10e] ? t[0x10e] : this.sig.st_key
-	this.sig.st_web_sig = t[0x103] ? t[0x103] : this.sig.st_web_sig
-	this.sig.t103 = t[0x103] ? t[0x103] : this.sig.t103
-	this.sig.skey = t[0x120] ? t[0x120] : this.sig.skey
+	this.sig.tgt = t[0x10a] || this.sig.tgt
+	this.sig.skey = t[0x120] || this.sig.skey
 	this.sig.d2 = t[0x143] ? t[0x143] : this.sig.d2
-	this.sig.skid = t[0x108] ? t[0x108] : undefined
-	this.sig.d2key = t[0x305] ? t[0x305] : this.sig.d2key
-	this.sig.sig_key = t[0x133] ? t[0x133] : this.sig.sig_key
-	this.sig.ticket_key = t[0x134] ? t[0x134] : this.sig.ticket_key
-	this.sig.device_token = t[0x322] ? t[0x322] : this.sig.device_token
-	this.sig.tgtgt = t[0x10c] || md5(this.sig.d2key)
+	this.sig.d2key = t[0x305] || this.sig.d2key
+	this.sig.tgtgt = md5(this.sig.d2key)
+	this.sig.t103 = t[0x103] ? t[0x103] : this.sig.t103
 	this.sig.emp_time = timestamp()
 	if (t[0x512]) {
 		const r = Readable.from(t[0x512], { objectMode: false })
