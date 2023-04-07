@@ -151,11 +151,8 @@ export class Client extends BaseClient {
 		this.config.log_level = level
 	}
 
-	constructor(uin: number, config?: Config)
-	constructor(conf?: Config)
-	constructor(...args: [number, Config?] | [Config?]) {
-		let [uin, conf = uin] = args
-		if (typeof conf === "number") conf = {}
+	constructor(conf?: Config) {
+
 		const config = {
 			log_level: "info" as LogLevel,
 			platform: Platform.Android,
@@ -179,8 +176,7 @@ export class Client extends BaseClient {
 			fs.writeFileSync(file, JSON.stringify(device, null, 2))
 		}
 		super(config.platform, device);
-		if (typeof uin === "number") this.uin = uin
-		this.device.mtime = Math.floor(fs.statSync(file).mtimeMs || Date.now())
+		this.device.mtime=Math.floor(fs.statSync(file).mtimeMs || Date.now())
 		this.logger.level = config.log_level
 		if (isNew)
 			this.logger.mark("创建了新的设备文件：" + file)
@@ -229,35 +225,22 @@ export class Client extends BaseClient {
 	}
 
 	/**
-	 * 只能在初始化Client时传了uin或扫码登录，才能调用
-	 * * 传了`password`则尝试密码登录
-	 * * 不传`password`则尝试扫码登录
-	 * 未传任何参数 则尝试扫码登录
-	 * 掉线重连时也是自动调用此函数，走相同逻辑
-	 * 你也可以在配置中修改`reconn_interval`，关闭掉线重连并自行处理
-	 * @param password 可以为密码原文，或密码的md5值
-	 */
-	async login(password?: string | Buffer): Promise<void>
-
-	/**
 	 * 传了uin 未传password
 	 * 会优先尝试使用token登录 (token在上次登录成功后存放在`this.dir`的`${uin}_token`中)
+	 *
 	 * 传了uin无token或token失效时：
 	 * * 传了`password`则尝试密码登录
 	 * * 不传`password`则尝试扫码登录
+	 *
 	 * 未传任何参数 则尝试扫码登录
+	 *
 	 * 掉线重连时也是自动调用此函数，走相同逻辑
 	 * 你也可以在配置中修改`reconn_interval`，关闭掉线重连并自行处理
+	 *
 	 * @param uin number，登录账号
 	 * @param password 可以为密码原文，或密码的md5值
 	 */
-	async login(uin?: number, password?: string | Buffer): Promise<void>
-	async login(...args: [number?, (string | Buffer)?] | [(string | Buffer)?]) {
-		let [uin, password] = args
-		if (typeof uin !== "number") {
-			password = uin
-			uin = this.uin
-		}
+	async login(uin = this.uin, password?: string | Buffer) {
 		try {
 			if (!uin) throw new Error()
 			this.uin = uin

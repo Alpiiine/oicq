@@ -76,7 +76,6 @@ export abstract class Contactable {
 			c: true,
 		}
 	}
-
 	// 取私聊图片fid
 	private async _offPicUp(imgs: Image[]) {
 		const req: pb.Encodable[] = []
@@ -526,7 +525,11 @@ export abstract class Contactable {
 					}
 				}
 			}
-			const maker = await this._preprocess(fake.message)
+			const maker = new Converter(fake.message, {
+				dm: this.dm,
+				cachedir: path.join(this.c.dir, "image"),
+			})
+
 			if (maker?.brief && brief) {
 				maker.brief = brief
 			}
