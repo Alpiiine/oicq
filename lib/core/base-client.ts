@@ -1,5 +1,5 @@
-import { EventEmitter } from "events"
-import { randomBytes } from "crypto"
+import { Trapper, ToDispose, Matcher, Listener } from 'triptrap'
+import { randomBytes, createHash } from "crypto"
 import { Readable } from "stream"
 import Network from "./network"
 import Ecdh from "./ecdh"
@@ -9,7 +9,10 @@ import * as tea from "./tea"
 import * as pb from "./protobuf"
 import * as jce from "./jce"
 import { BUF0, BUF4, BUF16, NOOP, md5, timestamp, lock, hide, unzip, int32ip2str } from "./constants"
-import { ShortDevice, Device, generateFullDevice, Platform, Apk, getApkInfo } from "./device"
+import { ShortDevice, Device, Platform, Apk, getApkInfo } from "./device"
+import * as log4js from "log4js";
+import { log } from "../common";
+import axios from "axios";
 
 const FN_NEXT_SEQ = Symbol("FN_NEXT_SEQ")
 const FN_SEND = Symbol("FN_SEND")
@@ -41,45 +44,79 @@ export enum QrcodeResult {
 }
 
 export interface BaseClient {
-	/** 收到二维码 */
-	on(name: "internal.qrcode", listener: (this: this, qrcode: Buffer) => void): this
-	/** 收到滑动验证码 */
-	on(name: "internal.slider", listener: (this: this, url: string) => void): this
-	/** 登录保护验证 */
-	on(name: "internal.verify", listener: (this: this, url: string, phone: string) => void): this
-	/** token过期(此时已掉线) */
-	on(name: "internal.error.token", listener: (this: this) => void): this
-	/** 网络错误 */
-	on(name: "internal.error.network", listener: (this: this, code: number, message: string) => void): this
-	/** 密码登录相关错误 */
-	on(name: "internal.error.login", listener: (this: this, code: number, message: string) => void): this
-	/** 扫码登录相关错误 */
-	on(name: "internal.error.qrcode", listener: (this: this, code: QrcodeResult, message: string) => void): this
-	/** 登录成功 */
-	on(name: "internal.online", listener: (this: this, token: Buffer, nickname: string, gender: number, age: number) => void): this
-	/** token更新 */
-	on(name: "internal.token", listener: (this: this, token: Buffer) => void): this
-	/** 服务器强制下线 */
-	on(name: "internal.kickoff", listener: (this: this, reason: string) => void): this
-	/** 业务包 */
-	on(name: "internal.sso", listener: (this: this, cmd: string, payload: Buffer, seq: number) => void): this
-	/** 日志信息 */
-	on(name: "internal.verbose", listener: (this: this, verbose: unknown, level: VerboseLevel) => void): this
-	on(name: string | symbol, listener: (this: this, ...args: any[]) => void): this
-}
+	uin: number
+	logger: log4js.Logger
 
-export class BaseClient extends EventEmitter {
+	/** 收到二维码 */
+	on(name: "internal.qrcode", listener: (this: this, qrcode: Buffer) => void): ToDispose<this>
+
+	/** 收到滑动验证码 */
+	on(name: "internal.slider", listener: (this: this, url: string) => void): ToDispose<this>
+
+	/** 登录保护验证 */
+	on(name: "internal.verify", listener: (this: this, url: string, phone: string) => void): ToDispose<this>
+
+	/** token过期(此时已掉线) */
+	on(name: "internal.error.token", listener: (this: this) => void): ToDispose<this>
+
+	/** 网络错误 */
+	on(name: "internal.error.network", listener: (this: this, code: number, message: string) => void): ToDispose<this>
+
+	/** 密码登录相关错误 */
+	on(name: "internal.error.login", listener: (this: this, code: number, message: string) => void): ToDispose<this>
+
+	/** 扫码登录相关错误 */
+	on(name: "internal.error.qrcode", listener: (this: this, code: QrcodeResult, message: string) => void): ToDispose<this>
+
+	/** 登录成功 */
+	on(name: "internal.online", listener: (this: this, token: Buffer, nickname: string, gender: number, age: number) => void): ToDispose<this>
+
+	/** token更新 */
+	on(name: "internal.token", listener: (this: this, token: Buffer) => void): ToDispose<this>
+
+	/** 服务器强制下线 */
+	on(name: "internal.kickoff", listener: (this: this, reason: string) => void): ToDispose<this>
+
+	/** 业务包 */
+	on(name: "internal.sso", listener: (this: this, cmd: string, payload: Buffer, seq: number) => void): ToDispose<this>
+
+	/** 日志信息 */
+	on(name: "internal.verbose", listener: (this: this, verbose: unknown, level: VerboseLevel) => void): ToDispose<this>
+
+	on(name: string | symbol, listener: (this: this, ...args: any[]) => void): ToDispose<this>
+}
+async function getT544(this: BaseClient, ...cmds: string[]) {
+	if (!this.sig.t544) this.sig.t544 = {}
+	await Promise.all(cmds.map(async (cmd) => {
+		const { data: { data, code } } = await axios.get('http://icqq.tencentola.com/energy', {
+			timeout: 5000,
+			params: {
+				version: this.apk.sdkver,
+				uin: this.uin,
+				guid: this.device.guid.toString('hex'),
+				data: cmd,
+			}
+		}).catch(() => ({ data: { code: -1 } }))
+		if (code === 0) {
+			this.sig.t544[cmd] = data
+		}
+	}))
+}
+export class BaseClient extends Trapper {
 
 	private [IS_ONLINE] = false
 	private [LOGIN_LOCK] = false
+	// 心跳定时器
+	// @ts-ignore
+	private [HEARTBEAT]: NodeJS.Timeout
 	private [ECDH] = new Ecdh
 	private readonly [NET] = new Network
 	// 回包的回调函数
 	private readonly [HANDLERS] = new Map<number, (buf: Buffer) => void>()
-
+	public logger: log4js.Logger = log4js.getLogger(`[icqq]`)
 	readonly apk: Apk
 	readonly device: Device
-	readonly sig = {
+	readonly sig: Record<string, any> = {
 		seq: randomBytes(4).readUInt32BE() & 0xfff,
 		session: randomBytes(4),
 		randkey: randomBytes(16),
@@ -88,9 +125,11 @@ export class BaseClient extends EventEmitter {
 		skey: BUF0,
 		d2: BUF0,
 		d2key: BUF0,
+		t103: BUF0,
 		t104: BUF0,
 		t174: BUF0,
 		qrsig: BUF0,
+		t547: BUF0,
 		/** 大数据上传通道 */
 		bigdata: {
 			ip: "",
@@ -113,13 +152,11 @@ export class BaseClient extends EventEmitter {
 		emp_time: 0,
 		time_diff: 0,
 	}
-	readonly pskey: {[domain: string]: Buffer} = { }
+	readonly pskey: { [domain: string]: Buffer } = {}
 	/** 心跳间隔(秒) */
 	protected interval = 30
 	/** 随心跳一起触发的函数，可以随意设定 */
 	protected heartbeat = NOOP
-	// 心跳定时器
-	private [HEARTBEAT]: NodeJS.Timeout
 	/** 数据统计 */
 	protected readonly statistics = {
 		start_time: timestamp(),
@@ -134,10 +171,10 @@ export class BaseClient extends EventEmitter {
 		remote_port: 0,
 	}
 
-	constructor(public readonly uin: number, p: Platform = Platform.Android, d?: ShortDevice) {
+	constructor(p: Platform = Platform.Android, d?: ShortDevice) {
 		super()
 		this.apk = getApkInfo(p)
-		this.device = generateFullDevice(d || uin)
+		this.device = new Device(this.apk, d)
 		this[NET].on("error", err => this.emit("internal.verbose", err.message, VerboseLevel.Error))
 		this[NET].on("close", () => {
 			this.statistics.remote_ip = ""
@@ -154,7 +191,6 @@ export class BaseClient extends EventEmitter {
 		this[NET].on("lost", lostListener.bind(this))
 		this.on("internal.online", onlineListener)
 		this.on("internal.sso", ssoListener)
-		lock(this, "uin")
 		lock(this, "apk")
 		lock(this, "device")
 		lock(this, "sig")
@@ -174,10 +210,86 @@ export class BaseClient extends EventEmitter {
 			this[NET].auto_search = true
 		}
 	}
-
+	on(matcher: Matcher, listener: Listener) {
+		return this.trap(matcher, listener)
+	}
+	once(matcher: Matcher, listener: Listener) {
+		return this.trapOnce(matcher, listener)
+	}
+	off(matcher: Matcher) {
+		return this.offTrap(matcher)
+	}
+	emit(matcher: Matcher, ...args: any[]) {
+		return this.trip(matcher, ...args)
+	}
 	/** 是否为在线状态 (可以收发业务包的状态) */
 	isOnline() {
 		return this[IS_ONLINE]
+	}
+	calcPoW(data: any) {
+		if (!data || data.length === 0) return Buffer.alloc(0);
+		const stream = Readable.from(data, { objectMode: false });
+		const version = stream.read(1).readUInt8();
+		const typ = stream.read(1).readUInt8();
+		const hashType = stream.read(1).readUInt8();
+		let ok = stream.read(1).readUInt8() === 0;
+		const maxIndex = stream.read(2).readUInt16BE();
+		const reserveBytes = stream.read(2);
+		const src = stream.read(stream.read(2).readUInt16BE());
+		const tgt = stream.read(stream.read(2).readUInt16BE());
+		const cpy = stream.read(stream.read(2).readUInt16BE());
+		if (hashType !== 1) {
+			this.logger.warn(`Unsupported tlv546 hash type ${hashType}`);
+			return Buffer.alloc(0);
+		}
+		let inputNum = BigInt("0x" + src.toString("hex"));
+		switch (typ) {
+			case 1:
+				// TODO
+				// See https://github.com/mamoe/mirai/blob/cc7f35519ea7cc03518a57dc2ee90d024f63be0e/mirai-core/src/commonMain/kotlin/network/protocol/packet/login/wtlogin/WtLoginExt.kt#L207
+				this.logger.warn(`Unsupported tlv546 algorithm type ${typ}`);
+				break;
+			case 2:
+				// Calc SHA256
+				let dst;
+				let elp = 0, cnt = 0;
+				if (tgt.length === 32) {
+					const start = Date.now();
+					let hash = createHash("sha256").update(Buffer.from(inputNum.toString(16), "hex")).digest();
+					while (Buffer.compare(hash, tgt) !== 0) {
+						inputNum++;
+						hash = createHash("sha256").update(Buffer.from(inputNum.toString(16), "hex")).digest();
+						cnt++;
+						if (cnt > 1000000) {
+							this.logger.error("Calculating PoW cost too much time, maybe something wrong");
+							throw new Error("Calculating PoW cost too much time, maybe something wrong");
+						}
+					}
+					ok = true;
+					dst = Buffer.from(inputNum.toString(16), "hex");
+					elp = Date.now() - start;
+					this.logger.info(`Calculating PoW of plus ${cnt} times cost ${elp} ms`);
+				}
+				if (!ok) return Buffer.alloc(0);
+				const body = new Writer()
+					.writeU8(version)
+					.writeU8(typ)
+					.writeU8(hashType)
+					.writeU8(ok ? 1 : 0)
+					.writeU16(maxIndex)
+					.writeBytes(reserveBytes)
+					.writeTlv(src)
+					.writeTlv(tgt)
+					.writeTlv(cpy);
+				if (dst) body.writeTlv(dst)
+				body.writeU32(elp)
+					.writeU32(cnt);
+				return body.read();
+			default:
+				this.logger.warn(`Unsupported tlv546 algorithm type ${typ}`);
+				break;
+		}
+		return Buffer.alloc(0);
 	}
 
 	/** 下线 (keepalive: 是否保持tcp连接) */
@@ -196,24 +308,33 @@ export class BaseClient extends EventEmitter {
 	}
 
 	/** 使用接收到的token登录 */
-	tokenLogin(token: Buffer) {
-		if (![144, 152].includes(token.length))
+	async tokenLogin(token: Buffer) {
+		if (![144, 152, 160].includes(token.length))
 			throw new Error("bad token")
 		this.sig.session = randomBytes(4)
 		this.sig.randkey = randomBytes(16)
 		this[ECDH] = new Ecdh
 		this.sig.d2key = token.slice(0, 16)
-		this.sig.d2 = token.slice(16, token.length - 72)
-		this.sig.tgt = token.slice(token.length - 72)
+		if (token.length === 160) {
+			this.sig.d2 = token.slice(16, token.length - 80)
+			this.sig.tgt = token.slice(token.length - 80)
+		} else {
+			this.sig.d2 = token.slice(16, token.length - 72)
+			this.sig.tgt = token.slice(token.length - 72)
+		}
 		this.sig.tgtgt = md5(this.sig.d2key)
 		const t = tlv.getPacker(this)
-		const body = new Writer()
+		let tlv_count = 19
+		if (this.apk.ssover <= 12) tlv_count--
+		const writer = new Writer()
 			.writeU16(11)
-			.writeU16(16)
+			.writeU16(tlv_count)
 			.writeBytes(t(0x100))
 			.writeBytes(t(0x10a))
 			.writeBytes(t(0x116))
+			.writeBytes(t(0x108))
 			.writeBytes(t(0x144))
+			//.writeBytes(t(0x112))
 			.writeBytes(t(0x143))
 			.writeBytes(t(0x142))
 			.writeBytes(t(0x154))
@@ -224,30 +345,47 @@ export class BaseClient extends EventEmitter {
 			.writeBytes(t(0x177))
 			.writeBytes(t(0x187))
 			.writeBytes(t(0x188))
-			.writeBytes(t(0x202))
+			.writeBytes(t(0x194))
 			.writeBytes(t(0x511))
-			.read()
+			.writeBytes(t(0x202))
+
+		if (this.apk.ssover > 12) {
+			let cmd = '810_b'
+			if (!this.sig.t544 || !this.sig.t544[cmd]) await getT544.call(this, cmd)
+			writer.writeBytes(t(0x544, cmd))
+		}
+
+		const body = writer.read()
 		this[FN_SEND_LOGIN]("wtlogin.exchange_emp", body)
 	}
+
 	/**
 	 * 使用密码登录
+	 * @param uin 登录账号
 	 * @param md5pass 密码的md5值
 	 */
-	passwordLogin(md5pass: Buffer) {
+	async passwordLogin(uin: number, md5pass: Buffer) {
+		if (this.apk.display !== 'iPad' && !this.device.qImei36 || !this.device.qImei16) {
+			await this.device.getQIMEI()
+		}
+		this.uin = uin
 		this.sig.session = randomBytes(4)
 		this.sig.randkey = randomBytes(16)
 		this.sig.tgtgt = randomBytes(16)
 		this[ECDH] = new Ecdh
 		const t = tlv.getPacker(this)
-		let body = new Writer()
+		let tlv_count = this.device.qImei16 ? 25 : 26
+		if (this.apk.ssover <= 12) tlv_count--
+		let writer = new Writer()
 			.writeU16(9)
-			.writeU16(23)
+			.writeU16(tlv_count)
 			.writeBytes(t(0x18))
 			.writeBytes(t(0x1))
 			.writeBytes(t(0x106, md5pass))
 			.writeBytes(t(0x116))
 			.writeBytes(t(0x100))
 			.writeBytes(t(0x107))
+			//.writeBytes(t(0x108))
 			.writeBytes(t(0x142))
 			.writeBytes(t(0x144))
 			.writeBytes(t(0x145))
@@ -258,30 +396,47 @@ export class BaseClient extends EventEmitter {
 			.writeBytes(t(0x511))
 			.writeBytes(t(0x187))
 			.writeBytes(t(0x188))
-			.writeBytes(t(0x194))
-			.writeBytes(t(0x191))
-			.writeBytes(t(0x202))
 			.writeBytes(t(0x177))
 			.writeBytes(t(0x516))
-			.writeBytes(t(0x521))
+			.writeBytes(t(0x521, 0))
 			.writeBytes(t(0x525))
-			.read()
-		this[FN_SEND_LOGIN]("wtlogin.login", body)
+			.writeBytes(t(0x191))
+			.writeBytes(t(0x548))
+			.writeBytes(t(0x542))
+
+		if (!this.device.qImei16) writer.writeBytes(t(0x194))
+		if (!this.device.qImei16) writer.writeBytes(t(0x202))
+		if (this.device.qImei16) writer.writeBytes(t(0x545, this.device.qImei16))
+
+		if (this.apk.ssover > 12) {
+			let cmd = '810_9'
+			if (!this.sig.t544 || !this.sig.t544[cmd]) await getT544.call(this, cmd)
+			writer.writeBytes(t(0x544, cmd))
+		}
+
+		this[FN_SEND_LOGIN]("wtlogin.login", writer.read())
 	}
 
 	/** 收到滑动验证码后，用于提交滑动验证码 */
-	submitSlider(ticket: string) {
+	async submitSlider(ticket: string) {
 		ticket = String(ticket).trim()
 		const t = tlv.getPacker(this)
-		const body = new Writer()
+		let tlv_count = this.sig.t547.length ? 6 : 5
+		if (this.apk.ssover <= 12) tlv_count--
+		const writer = new Writer()
 			.writeU16(2)
-			.writeU16(4)
+			.writeU16(tlv_count)
 			.writeBytes(t(0x193, ticket))
 			.writeBytes(t(0x8))
 			.writeBytes(t(0x104))
 			.writeBytes(t(0x116))
-			.read()
-		this[FN_SEND_LOGIN]("wtlogin.login", body)
+		if (this.sig.t547.length) writer.writeBytes(t(0x547));
+		if (this.apk.ssover > 12) {
+			let cmd = '810_2'
+			if (!this.sig.t544 || !this.sig.t544[cmd]) await getT544.call(this, cmd)
+			writer.writeBytes(t(0x544, cmd))
+		}
+		this[FN_SEND_LOGIN]("wtlogin.login", writer.read())
 	}
 
 	/** 收到设备锁验证请求后，用于发短信 */
@@ -301,14 +456,16 @@ export class BaseClient extends EventEmitter {
 	}
 
 	/** 提交短信验证码 */
-	submitSmsCode(code: string) {
+	async submitSmsCode(code: string) {
 		code = String(code).trim()
 		if (Buffer.byteLength(code) !== 6)
 			code = "123456"
 		const t = tlv.getPacker(this)
-		const body = new Writer()
+		let tlv_count = 8
+		if (this.apk.ssover <= 12) tlv_count--
+		const writer = new Writer()
 			.writeU16(7)
-			.writeU16(7)
+			.writeU16(tlv_count)
 			.writeBytes(t(0x8))
 			.writeBytes(t(0x104))
 			.writeBytes(t(0x116))
@@ -316,11 +473,15 @@ export class BaseClient extends EventEmitter {
 			.writeBytes(t(0x17c, code))
 			.writeBytes(t(0x401))
 			.writeBytes(t(0x198))
-			.read()
-		this[FN_SEND_LOGIN]("wtlogin.login", body)
+		if (this.apk.ssover > 12) {
+			let cmd = '810_7'
+			if (!this.sig.t544 || !this.sig.t544[cmd]) await getT544.call(this, cmd)
+			writer.writeBytes(t(0x544, cmd))
+		}
+		this[FN_SEND_LOGIN]("wtlogin.login", writer.read())
 	}
 
-	/** 获取登录二维码(模拟手表协议扫码登录) */
+	/** 获取登录二维码(模拟IPad协议扫码登录) */
 	fetchQrcode() {
 		const t = tlv.getPacker(this)
 		const body = new Writer()
@@ -335,7 +496,7 @@ export class BaseClient extends EventEmitter {
 			.writeBytes(t(0x1D))
 			.writeBytes(t(0x1F))
 			.writeBytes(t(0x33))
-			.writeBytes(t(0x35))
+			.writeBytes(t(0x35, 3))
 			.read()
 		const pkt = buildCode2dPacket.call(this, 0x31, 0x11100, body)
 		this[FN_SEND](pkt).then(payload => {
@@ -361,11 +522,8 @@ export class BaseClient extends EventEmitter {
 		if (retcode < 0) {
 			this.emit("internal.error.network", -2, "server is busy")
 		} else if (retcode === 0 && t106 && t16a && t318 && tgtgt) {
+			this.uin = uin as number
 			this.sig.qrsig = BUF0
-			if (uin !== this.uin) {
-				this.emit("internal.error.qrcode", retcode, `扫码账号(${uin})与登录账号(${this.uin})不符`)
-				return
-			}
 			this.sig.tgtgt = tgtgt
 			const t = tlv.getPacker(this)
 			const body = new Writer()
@@ -395,7 +553,7 @@ export class BaseClient extends EventEmitter {
 				.writeBytes(t(0x202))
 				.writeBytes(t(0x177))
 				.writeBytes(t(0x516))
-				.writeBytes(t(0x521))
+				.writeBytes(t(0x521, 8))
 				.writeU16(0x318)
 				.writeTlv(t318)
 				.read()
@@ -403,21 +561,21 @@ export class BaseClient extends EventEmitter {
 		} else {
 			let message
 			switch (retcode) {
-			case QrcodeResult.Timeout:
-				message = "二维码超时，请重新获取"
-				break
-			case QrcodeResult.WaitingForScan:
-				message = "二维码尚未扫描"
-				break
-			case QrcodeResult.WaitingForConfirm:
-				message = "二维码尚未确认"
-				break
-			case QrcodeResult.Canceled:
-				message = "二维码被取消，请重新获取"
-				break
-			default:
-				message = "扫码遇到未知错误，请重新获取"
-				break
+				case QrcodeResult.Timeout:
+					message = "二维码超时，请重新获取"
+					break
+				case QrcodeResult.WaitingForScan:
+					message = "二维码尚未扫描"
+					break
+				case QrcodeResult.WaitingForConfirm:
+					message = "二维码尚未确认"
+					break
+				case QrcodeResult.Canceled:
+					message = "二维码被取消，请重新获取"
+					break
+				default:
+					message = "扫码遇到未知错误，请重新获取"
+					break
 			}
 			this.sig.qrsig = BUF0
 			this.emit("internal.error.qrcode", retcode, message)
@@ -468,7 +626,8 @@ export class BaseClient extends EventEmitter {
 				t318 = t[0x65]
 				tgtgt = t[0x1e]
 			}
-		} catch { }
+		} catch {
+		}
 		return { retcode, uin, t106, t16a, t318, tgtgt }
 	}
 
@@ -477,6 +636,7 @@ export class BaseClient extends EventEmitter {
 			this.sig.seq = 1
 		return this.sig.seq
 	}
+
 	private [FN_SEND](pkt: Uint8Array, timeout = 5) {
 		this.statistics.sent_pkt_cnt++
 		const seq = this.sig.seq
@@ -497,6 +657,7 @@ export class BaseClient extends EventEmitter {
 			})
 		})
 	}
+
 	private async [FN_SEND_LOGIN](cmd: LoginCmd, body: Buffer) {
 		if (this[IS_ONLINE] || this[LOGIN_LOCK])
 			return
@@ -510,16 +671,58 @@ export class BaseClient extends EventEmitter {
 			this.emit("internal.verbose", e.message, VerboseLevel.Error)
 		}
 	}
+
 	/** 发送一个业务包不等待返回 */
 	writeUni(cmd: string, body: Uint8Array, seq = 0) {
 		this.statistics.sent_pkt_cnt++
 		this[NET].write(buildUniPkt.call(this, cmd, body, seq))
 	}
+
+	/** dont use it if not clear the usage */
+	sendOidb(cmd: string, body: Uint8Array, timeout = 5) {
+		const sp = cmd //OidbSvc.0x568_22
+			.replace("OidbSvc.", "")
+			.replace("oidb_", "")
+			.split("_")
+		const type1 = parseInt(sp[0], 16), type2 = parseInt(sp[1])
+		body = pb.encode({
+			1: type1,
+			2: isNaN(type2) ? 1 : type2,
+			3: 0,
+			4: body,
+			6: "android " + this.apk.ver,
+		})
+		return this.sendUni(cmd, body, timeout)
+	}
+
+	async sendPacket(type: string, cmd: string, body: any): Promise<Buffer> {
+		if (type === 'Uni') return await this.sendUni(cmd, body)
+		else return await this.sendOidb(cmd, body)
+	}
+
 	/** 发送一个业务包并等待返回 */
 	async sendUni(cmd: string, body: Uint8Array, timeout = 5) {
 		if (!this[IS_ONLINE])
 			throw new ApiRejection(-1, `client not online`)
 		return this[FN_SEND](buildUniPkt.call(this, cmd, body), timeout)
+	}
+
+	async sendOidbSvcTrpcTcp(cmd: string, body: Uint8Array) {
+		const sp = cmd //OidbSvcTrpcTcp.0xf5b_1
+			.replace("OidbSvcTrpcTcp.", "")
+			.split("_");
+		const type1 = parseInt(sp[0], 16), type2 = parseInt(sp[1]);
+		body = pb.encode({
+			1: type1,
+			2: type2,
+			4: body,
+			6: "android " + this.apk.ver,
+		})
+		const payload = await this.sendUni(cmd, body)
+		log(payload)
+		const rsp = pb.decode(payload)
+		if (rsp[3] === 0) return rsp[4]
+		throw new ApiRejection(rsp[3], rsp[5])
 	}
 }
 
@@ -556,43 +759,48 @@ const EVENT_KICKOFF = Symbol("EVENT_KICKOFF")
 
 function ssoListener(this: BaseClient, cmd: string, payload: Buffer, seq: number) {
 	switch (cmd) {
-	case "StatSvc.ReqMSFOffline":
-	case "MessageSvc.PushForceOffline":
-		{
+		case "StatSvc.ReqMSFOffline":
+		case "MessageSvc.PushForceOffline": {
 			const nested = jce.decodeWrapper(payload)
 			const msg = nested[4] ? `[${nested[4]}]${nested[3]}` : `[${nested[1]}]${nested[2]}`
 			this.emit(EVENT_KICKOFF, msg)
 		}
-		break
-	case "QualityTest.PushList":
-	case "OnlinePush.SidTicketExpired":
-		this.writeUni(cmd, BUF0, seq)
-		break
-	case "ConfigPushSvc.PushReq":
-		{
+			break
+		case "QualityTest.PushList":
+		case "OnlinePush.SidTicketExpired":
+			this.writeUni(cmd, BUF0, seq)
+			break
+		case "ConfigPushSvc.PushReq": {
 			if (payload[0] === 0)
 				payload = payload.slice(4)
 			const nested = jce.decodeWrapper(payload)
 			if (nested[1] === 2 && nested[2]) {
 				const buf = jce.decode(nested[2])[5][5]
 				const decoded = pb.decode(buf)[1281]
-				this.sig.bigdata.sig_session = decoded[1].toBuffer()
-				this.sig.bigdata.session_key = decoded[2].toBuffer()
-				for (let v of decoded[3]) {
-					if (v[1] === 10) {
-						this.sig.bigdata.port = v[2][0][3]
-						this.sig.bigdata.ip = int32ip2str(v[2][0][2])
+				try {
+					this.sig.bigdata.sig_session = decoded[1].toBuffer()
+					this.sig.bigdata.session_key = decoded[2].toBuffer()
+					for (let v of decoded[3]) {
+						if (v[1] === 10) {
+							this.sig.bigdata.port = v[2][0][3]
+							this.sig.bigdata.ip = int32ip2str(v[2][0][2])
+						}
 					}
+				} catch {
+					this.sig.bigdata.sig_session = Buffer.from('')
+					this.sig.bigdata.session_key = Buffer.from('')
+					this.sig.bigdata.port = 0
+					this.sig.bigdata.ip = ''
 				}
 			}
 		}
-		break
+			break
 	}
 }
 
 function onlineListener(this: BaseClient) {
-	if (!this.listenerCount(EVENT_KICKOFF)) {
-		this.once(EVENT_KICKOFF, (msg: string) => {
+	if (!this.listeners(EVENT_KICKOFF).length) {
+		this.trapOnce(EVENT_KICKOFF, (msg: string) => {
 			this[IS_ONLINE] = false
 			clearInterval(this[HEARTBEAT])
 			this.emit("internal.kickoff", msg)
@@ -646,18 +854,18 @@ async function packetListener(this: BaseClient, pkt: Buffer) {
 		const encrypted = pkt.slice(pkt.readUInt32BE(6) + 6)
 		let decrypted
 		switch (flag) {
-		case 0:
-			decrypted = encrypted
-			break
-		case 1:
-			decrypted = tea.decrypt(encrypted, this.sig.d2key)
-			break
-		case 2:
-			decrypted = tea.decrypt(encrypted, BUF16)
-			break
-		default:
-			this.emit("internal.error.token")
-			throw new Error("unknown flag:" + flag)
+			case 0:
+				decrypted = encrypted
+				break
+			case 1:
+				decrypted = tea.decrypt(encrypted, this.sig.d2key)
+				break
+			case 2:
+				decrypted = tea.decrypt(encrypted, BUF16)
+				break
+			default:
+				this.emit("internal.error.token")
+				throw new Error("unknown flag:" + flag)
 		}
 		const sso = await parseSso.call(this, decrypted)
 		this.emit("internal.verbose", `recv:${sso.cmd} seq:${sso.seq}`, VerboseLevel.Debug)
@@ -726,7 +934,8 @@ function syncTimeDiff(this: BaseClient) {
 	this[FN_SEND](pkt).then(buf => {
 		try {
 			this.sig.time_diff = buf.readInt32BE() - timestamp()
-		} catch { }
+		} catch {
+		}
 	}).catch(NOOP)
 }
 
@@ -734,9 +943,11 @@ async function refreshToken(this: BaseClient) {
 	if (!this.isOnline() || timestamp() - this.sig.emp_time < 14000)
 		return
 	const t = tlv.getPacker(this)
-	const body = new Writer()
+	let tlv_count = 17
+	if (this.apk.ssover <= 12) tlv_count--
+	const writer = new Writer()
 		.writeU16(11)
-		.writeU16(16)
+		.writeU16(tlv_count)
 		.writeBytes(t(0x100))
 		.writeBytes(t(0x10a))
 		.writeBytes(t(0x116))
@@ -753,7 +964,14 @@ async function refreshToken(this: BaseClient) {
 		.writeBytes(t(0x188))
 		.writeBytes(t(0x202))
 		.writeBytes(t(0x511))
-		.read()
+
+	if (this.apk.ssover > 12) {
+		let cmd = '810_b'
+		if (!this.sig.t544 || !this.sig.t544[cmd]) await getT544.call(this, cmd)
+		writer.writeBytes(t(0x544, cmd))
+	}
+
+	const body = writer.read()
 	const pkt = buildLoginPacket.call(this, "wtlogin.exchange_emp", body)
 	try {
 		let payload = await this[FN_SEND](pkt)
@@ -775,7 +993,7 @@ async function refreshToken(this: BaseClient) {
 }
 
 function readTlv(r: Readable) {
-	const t: {[tag: number]: Buffer} = { }
+	const t: { [tag: number]: Buffer } = {}
 	while (r.readableLength > 2) {
 		const k = r.read(2).readUInt16BE() as number
 		t[k] = r.read(r.read(2).readUInt16BE())
@@ -783,7 +1001,12 @@ function readTlv(r: Readable) {
 	return t
 }
 
-type LoginCmd = "wtlogin.login" | "wtlogin.exchange_emp" | "wtlogin.trans_emp" | "StatSvc.register" | "Client.CorrectTime"
+type LoginCmd =
+	"wtlogin.login"
+	| "wtlogin.exchange_emp"
+	| "wtlogin.trans_emp"
+	| "StatSvc.register"
+	| "Client.CorrectTime"
 type LoginCmdType = 0 | 1 | 2
 
 function buildLoginPacket(this: BaseClient, cmd: LoginCmd, body: Buffer, type: LoginCmdType = 2): Buffer {
@@ -822,6 +1045,7 @@ function buildLoginPacket(this: BaseClient, cmd: LoginCmd, body: Buffer, type: L
 			.writeU8(0x03)
 			.read()
 	}
+	const ksid = Buffer.from(`|${this.device.imei}|` + this.apk.name)
 	let sso = new Writer()
 		.writeWithLength(new Writer()
 			.writeU32(this.sig.seq)
@@ -833,8 +1057,9 @@ function buildLoginPacket(this: BaseClient, cmd: LoginCmd, body: Buffer, type: L
 			.writeWithLength(this.sig.session)
 			.writeWithLength(this.device.imei)
 			.writeU32(4)
-			.writeU16(2)
-			.writeU32(4)
+			.writeU16(ksid.length + 2)
+			.writeBytes(ksid)
+			.writeWithLength(this.device.qImei16 || BUF0)
 			.read()
 		)
 		.writeWithLength(body)
@@ -882,11 +1107,12 @@ function decodeT119(this: BaseClient, t119: Buffer) {
 	const r = Readable.from(tea.decrypt(t119, this.sig.tgtgt), { objectMode: false })
 	r.read(2)
 	const t = readTlv(r)
-	this.sig.tgt = t[0x10a]
-	this.sig.skey = t[0x120]
-	this.sig.d2 = t[0x143]
-	this.sig.d2key = t[0x305]
+	this.sig.tgt = t[0x10a] || this.sig.tgt
+	this.sig.skey = t[0x120] || this.sig.skey
+	this.sig.d2 = t[0x143] ? t[0x143] : this.sig.d2
+	this.sig.d2key = t[0x305] || this.sig.d2key
 	this.sig.tgtgt = md5(this.sig.d2key)
+	this.sig.t103 = t[0x103] ? t[0x103] : this.sig.t103
 	this.sig.emp_time = timestamp()
 	if (t[0x512]) {
 		const r = Readable.from(t[0x512], { objectMode: false })
@@ -916,7 +1142,7 @@ function decodeLoginResponse(this: BaseClient, payload: Buffer): any {
 	const type = r.read(1).readUInt8() as number
 	r.read(2)
 	const t = readTlv(r)
-
+	if (t[0x546]) this.sig.t547 = this.calcPoW(t[0x546]);
 	if (type === 204) {
 		this.sig.t104 = t[0x104]
 		this.emit("internal.verbose", "unlocking...", VerboseLevel.Mark)
@@ -937,8 +1163,9 @@ function decodeLoginResponse(this: BaseClient, payload: Buffer): any {
 		this.sig.t174 = BUF0
 		const { token, nickname, gender, age } = decodeT119.call(this, t[0x119])
 		return register.call(this).then(() => {
-			if (this[IS_ONLINE])
+			if (this[IS_ONLINE]) {
 				this.emit("internal.online", token, nickname, gender, age)
+			}
 		})
 	}
 
@@ -953,7 +1180,7 @@ function decodeLoginResponse(this: BaseClient, payload: Buffer): any {
 		return this.emit("internal.error.login", type, "[登陆失败]未知格式的验证码")
 	}
 
-	if (type === 160) {
+	if (type === 160 || type === 162 || type === 239) {
 		if (!t[0x204] && !t[0x174])
 			return this.emit("internal.verbose", "已向密保手机发送短信验证码", VerboseLevel.Mark)
 		let phone = ""
@@ -974,13 +1201,14 @@ function decodeLoginResponse(this: BaseClient, payload: Buffer): any {
 	}
 
 	if (t[0x146]) {
-		const stream = Readable.from(t[0x146], { objectMode: false })
-		const version = stream.read(4)
-		const title = stream.read(stream.read(2).readUInt16BE()).toString()
-		const content = stream.read(stream.read(2).readUInt16BE()).toString()
+		const stream = Readable.from(t[0x146], { objectMode: false });
+		const version = stream.read(4);
+		const title = stream.read(stream.read(2).readUInt16BE()).toString();
+		const content = stream.read(stream.read(2).readUInt16BE()).toString();
+		const message = `[${title}]${content}`;
+		this.logger.warn("token失效: " + message + "(错误码：" + type + ")");
 		return this.emit("internal.error.login", type, `[${title}]${content}`)
 	}
 
 	this.emit("internal.error.login", type, `[登陆失败]未知错误`)
 }
-

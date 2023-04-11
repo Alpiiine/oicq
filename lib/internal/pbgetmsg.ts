@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto"
-import { pb, jce } from "../core"
-import { uin2code, NOOP, timestamp, log } from "../common"
+import {pb, jce} from "../core"
+import { uin2code, NOOP, timestamp } from "../common"
 import { PrivateMessage } from "../message"
 import { PrivateMessageEvent } from "../events"
 import { emitGroupNoticeEvent } from "./onlinepush"

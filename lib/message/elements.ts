@@ -1,3 +1,5 @@
+import {makeMusicJson, musicFactory, MusicFullInfo, MusicPlatform} from "./music";
+
 /** TEXT (此元素可使用字符串代替) */
 export interface TextElem {
 	type: "text"
@@ -19,9 +21,10 @@ export interface AtElem {
 /** 表情 */
 export interface FaceElem {
 	type: "face" | "sface"
-	/** face为0~324，sface不明 */
+	/** face为0~348，sface不明 */
 	id: number
 	text?: string
+	qlottie?: string
 }
 
 /** 原创表情 */
@@ -126,7 +129,6 @@ export interface XmlElem {
 	data: string
 	id?: number
 }
-
 /** 戳一戳 */
 export interface PokeElem {
 	type: "poke"
@@ -154,9 +156,14 @@ export interface FileElem {
 /** @deprecated @cqhttp 旧版引用回复(已弃用)，仅做一定程度的兼容 */
 export interface ReplyElem {
 	type: "reply"
+	text?:string
 	id: string
 }
-
+export interface MusicElem extends Partial<MusicFullInfo>{
+	type: 'music'
+	id: string
+	platform: MusicPlatform
+}
 /** 可引用回复的消息 */
 export interface Quotable {
 	user_id: number
@@ -168,6 +175,9 @@ export interface Quotable {
 	message: Sendable
 }
 
+export interface QuoteElem extends Quotable{
+	type: 'quote'
+}
 /** 可转发的消息 */
 export interface Forwardable {
 	user_id: number,
@@ -175,13 +185,18 @@ export interface Forwardable {
 	nickname?: string,
 	time?: number,
 }
+/** 可转发节点 */
+export interface ForwardNode extends Forwardable{
+	type:'node'
+}
 
 /** 可组合发送的元素 */
-export type ChainElem = TextElem | FaceElem | BfaceElem | MfaceElem | ImageElem | AtElem | MiraiElem | ReplyElem
+export type ChainElem = TextElem | FaceElem | BfaceElem | MfaceElem | ImageElem | AtElem | MiraiElem
 
 /** 注意：只有`ChainElem`中的元素可以组合发送，其他元素只能单独发送 */
 export type MessageElem = TextElem | FaceElem | BfaceElem | MfaceElem | ImageElem | AtElem | MiraiElem | ReplyElem |
-	FlashElem | PttElem | VideoElem | JsonElem | XmlElem | PokeElem | LocationElem | ShareElem | FileElem
+	FlashElem | PttElem | VideoElem | JsonElem | XmlElem | PokeElem | LocationElem |
+	ShareElem | MusicElem | FileElem | ForwardNode | QuoteElem
 
 /** 可通过sendMsg发送的类型集合 (字符串、元素对象，或它们的数组) */
 export type Sendable = string | MessageElem | (string | MessageElem)[]
@@ -259,7 +274,8 @@ export const segment = {
 	/** 视频(仅支持本地文件) */
 	video(file: string): VideoElem {
 		return {
-			type: "video", file
+			type: "video",
+			file
 		}
 	},
 	json(data: any): JsonElem {
@@ -277,6 +293,14 @@ export const segment = {
 		return {
 			type: "mirai", data
 		}
+	},
+	async music(id:string,platform:MusicPlatform='qq'):Promise<JsonElem>{
+		const musiInfo=await musicFactory[platform].getMusicInfo(id)
+		musiInfo.jumpUrl=`https://ptlogin2.qq.com@${musiInfo.jumpUrl.replace(/https?:\/\//,'')}`
+		return this.json(makeMusicJson({...musiInfo,platform}))
+	},
+	fake(user_id:number,message:Sendable,nickname?:string,time?:number):ForwardNode{
+		return {type:'node',user_id,nickname,message,time}
 	},
 	/** 链接分享 */
 	share(url: string, title: string, image?: string, content?: string): ShareElem {

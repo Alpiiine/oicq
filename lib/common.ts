@@ -3,7 +3,7 @@ import * as crypto from "crypto"
 import * as stream from "stream"
 import * as util from "util"
 import * as os from "os"
-import { pb } from "./core"
+import * as pb from "./core/protobuf"
 
 export function uuid() {
 	let hex = crypto.randomBytes(16).toString("hex")
@@ -132,7 +132,6 @@ export class DownloadTransform extends stream.Transform {
 		callback(error)
 	}
 }
-
 export const PB_CONTENT = pb.encode({ 1: 1, 2: 0, 3: 0 })
 export const IS_WIN = os.platform() === "win32"
 
@@ -150,6 +149,7 @@ export type GroupRole = "owner" | "admin" | "member"
 
 /** 可设置的在线状态 */
 export enum OnlineStatus {
+	Offline,
 	Online = 11,
 	Absent = 31,
 	Invisible = 41,

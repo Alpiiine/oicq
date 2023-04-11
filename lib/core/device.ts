@@ -1,21 +1,12 @@
-import { randomBytes } from "crypto"
-import { md5 } from "./constants"
+import {randomBytes} from "crypto"
+import {formatTime, md5, randomString} from "./constants"
+import axios from "axios";
+import {aesDecrypt, aesEncrypt, encryptPKCS1} from "./algo";
 
-function generateImei(uin: number) {
-	let imei = uin % 2 ? "86" : "35"
-	const buf = Buffer.alloc(4)
-	buf.writeUInt32BE(uin)
-	let a: number | string = buf.readUInt16BE()
-	let b: number | string = Buffer.concat([Buffer.alloc(1), buf.slice(1)]).readUInt32BE()
-	if (a > 9999)
-		a = Math.trunc(a / 10)
-	else if (a < 1000)
-		a = String(uin).substr(0, 4)
-	while (b > 9999999)
-		b = b >>> 1
-	if (b < 1000000)
-		b = String(uin).substr(0, 4) + String(uin).substr(0, 3)
-	imei += a + "0" + b
+
+function generateImei() {
+	let imei = `86${randomString(12, '0123456789')}`
+
 	function calcSP(imei: string) {
 		let sum = 0
 		for (let i = 0; i < imei.length; ++i) {
@@ -28,37 +19,40 @@ function generateImei(uin: number) {
 		}
 		return (100 - sum) % 10
 	}
+
 	return imei + calcSP(imei)
 }
 
 /** 生成短设备信息 */
-export function generateShortDevice(uin: number) {
-	const hash = md5(String(uin))
-	const hex = hash.toString("hex")
+export function generateShortDevice() {
+	const randstr = (length: number, num: boolean = false) => {
+		const map = num ? '0123456789' : '0123456789abcdef'
+		return randomString(length, map)
+	}
 	return {
-		"--begin--": "该设备由账号作为seed固定生成，账号不变则永远相同",
-		product: "MRS4S",
-		device: "HIM188MOE",
-		board: "MIRAI-YYDS",
-		brand: "OICQX",
-		model: "Konata 2020",
-		wifi_ssid: `TP-LINK-${uin.toString(16)}`,
-		bootloader: "U-boot",
-		android_id: `OICQX.${hash.readUInt16BE()}${hash[2]}.${hash[3]}${String(uin)[0]}`,
-		boot_id: hex.substr(0, 8) + "-" + hex.substr(8, 4) + "-" + hex.substr(12, 4) + "-" + hex.substr(16, 4) + "-" + hex.substr(20),
-		proc_version: `Linux version 4.19.71-${hash.readUInt16BE(4)} (konata@takayama.github.com)`,
-		mac_address: `00:50:${hash[6].toString(16).toUpperCase()}:${hash[7].toString(16).toUpperCase()}:${hash[8].toString(16).toUpperCase()}:${hash[9].toString(16).toUpperCase()}`,
-		ip_address: `10.0.${hash[10]}.${hash[11]}`,
-		imei: generateImei(uin),
-		incremental: hash.readUInt32BE(12),
-		"--end--": "修改后可能需要重新验证设备",
+		"--begin--": "该设备为随机生成，丢失后不能得到原先配置",
+		product: `ILPP-${randstr(5).toUpperCase()}`,
+		device: `${randstr(5).toUpperCase()}`,
+		board: `${randstr(5).toUpperCase()}`,
+		brand: `${randstr(4).toUpperCase()}`,
+		model: `ILPP ${randstr(4).toUpperCase()}`,
+		wifi_ssid: `HUAWEI-${randstr(7)}`,
+		bootloader: `U-boot`,
+		android_id: `IL.${randstr(7, true)}.${randstr(4, true)}`,
+		boot_id: `${randstr(8)}-${randstr(4)}-${randstr(4)}-${randstr(4)}-${randstr(12,)}`,
+		proc_version: `Linux version 5.10.101-android12-${randstr(8)}`,
+		mac_address: `2D:${randstr(2).toUpperCase()}:${randstr(2).toUpperCase()}:${randstr(2,).toUpperCase()}:${randstr(2).toUpperCase()}:${randstr(2).toUpperCase()}`,
+		ip_address: `192.168.${randstr(2, true)}.${randstr(2, true)}`,
+		imei: `${generateImei()}`,
+		incremental: `${randstr(10).toUpperCase()}`,
+		"--end--": "修改后可能需要重新验证设备。"
 	}
 }
 
+
 /** 生成完整设备信息 */
-export function generateFullDevice(d: ShortDevice | number) {
-	if (typeof d === "number")
-		d = generateShortDevice(d)
+export function generateFullDevice(apk: Apk, d?: ShortDevice) {
+	if (!d) d = generateShortDevice()
 	return {
 		display: d.android_id,
 		product: d.product,
@@ -92,9 +86,160 @@ export function generateFullDevice(d: ShortDevice | number) {
 }
 
 export type ShortDevice = ReturnType<typeof generateShortDevice>
-export type Device = ReturnType<typeof generateFullDevice>
 
-// ----------
+export interface Device extends ReturnType<typeof generateFullDevice> {
+	qImei16?: string
+	qImei36?: string
+	mtime?: number
+}
+
+export class Device {
+	private secret = 'ZdJqM15EeO2zWc08';
+	private publicKey = `-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDEIxgwoutfwoJxcGQeedgP7FG9
+qaIuS0qzfR8gWkrkTZKM2iWHn2ajQpBRZjMSoSf6+KJGvar2ORhBfpDXyVtZCKpq
+LQ+FLkpncClKVIrBwv6PHyUvuCb0rIarmgDnzkfQAqVufEtR64iazGDKatvJ9y6B
+9NMbHddGSAUmRTCrHQIDAQAB
+-----END PUBLIC KEY-----`;
+
+	constructor(private apk: Apk, d?: ShortDevice) {
+		if (!d) d = generateShortDevice()
+		Object.assign(this, generateFullDevice(apk, d))
+	}
+
+	async getQIMEI() {
+		if (this.apk.app_key === "") {
+			return;
+		}
+		const k = randomString(16);
+		const key = encryptPKCS1(this.publicKey, k);
+		const time = Date.now();
+		const nonce = randomString(16);
+		const payload = this.genRandomPayloadByDevice();
+		const params = aesEncrypt(JSON.stringify(payload), k).toString('base64');
+		try {
+			const {data} = await axios.post<{ data: string, code: number }>(
+				"https://snowflake.qq.com/ola/android", {
+					key,
+					params,
+					time, nonce,
+					sign: md5(key + params + time + nonce + this.secret).toString("hex"),
+					extra: ''
+				}, {
+					headers: {
+						'User-Agent': `Dalvik/2.1.0 (Linux; U; Android ${this.version.release}; PCRT00 Build/N2G48H)`,
+						'Content-Type': "application/json"
+					}
+				});
+			if (data?.code !== 0) {
+				return;
+			}
+			const {q16, q36} = JSON.parse(aesDecrypt(data.data, k))
+			this.qImei16 = q16
+			this.qImei36 = q36
+		} catch {
+		}
+	}
+
+	genRandomPayloadByDevice() {
+		const fixedRand = (max = 1, min = 0) => {
+			if (max < min) [max, min] = [min, max]
+			const diff = max - min
+			return Math.floor(Math.random() * diff) + min
+		};
+		const reserved = {
+			"harmony": "0",
+			"clone": Math.random() > 0.5 ? "1" : "0",
+			"containe": "",
+			"oz": "",
+			"oo": "",
+			"kelong": Math.random() > 0.5 ? "1" : "0",
+			"uptimes": formatTime(new Date()),
+			"multiUser": Math.random() > 0.5 ? "1" : "0",
+			"bod": this.board,
+			"brd": this.brand,
+			"dv": this.device,
+			"firstLevel": "",
+			"manufact": this.brand,
+			"name": this.model,
+			"host": "se.infra",
+			"kernel": this.fingerprint
+		};
+		const timestamp = Date.now();
+		this.mtime = this.mtime || Date.now()
+		const mtime1 = new Date(this.mtime || Date.now());
+		const dateFormat = (fmt?: string, time: number | Date = Date.now()) => formatTime(time, fmt)
+		const mtimeStr1 = dateFormat("YYYY-mm-ddHHMMSS", mtime1) + "." + this.imei.slice(2, 11);
+		const mtime2 = new Date(this.mtime - parseInt(this.imei.slice(2, 4)));
+		const mtimeStr2 = dateFormat("YYYY-mm-ddHHMMSS", mtime2) + "." + this.imei.slice(5, 14);
+		let beaconIdArr: (string | number)[] = [
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			mtimeStr1,
+			'0000000000000000',
+			md5(this.android_id + this.imei).toString("hex").slice(0, 16),
+			...new Array(4).fill(false).map((_) => fixedRand(10000000, 1000000)),
+			this.boot_id,
+			'1',
+			fixedRand(5, 0),
+			fixedRand(5, 0),
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			fixedRand(5, 0),
+			fixedRand(100, 10),
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			fixedRand(50000, 10000),
+			fixedRand(100, 10),
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			mtimeStr2,
+			fixedRand(10000, 1000),
+			fixedRand(5, 0),
+			`${dateFormat("YYYY-mm-ddHHMMSS")}.${String(((10 + parseInt(this.imei.slice(5, 7))) % 100)).padStart(2, "0")}0000000`,
+			`${dateFormat("YYYY-mm-ddHHMMSS")}.${String(((11 + parseInt(this.imei.slice(5, 7))) % 100)).padStart(2, "0")}0000000`,
+			fixedRand(10000, 1000),
+			fixedRand(100, 10),
+			`${dateFormat("YYYY-mm-ddHHMMSS")}.${String(((11 + parseInt(this.imei.slice(5, 7))) % 100)).padStart(2, "0")}0000000`,
+			`${dateFormat("YYYY-mm-ddHHMMSS")}.${String(((11 + parseInt(this.imei.slice(5, 7))) % 100)).padStart(2, "0")}0000000`,
+			fixedRand(10000, 1000),
+			fixedRand(5, 0),
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			fixedRand(5, 0),
+			fixedRand(100, 10),
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			`${formatTime(new Date(timestamp + fixedRand(60, 0)))}.${String(fixedRand(99, 0)).padStart(2, '0')}0000000`,
+			fixedRand(5, 0),
+			fixedRand(5, 0),
+		].map((str, idx) => `k${idx + 1}:${str}`)
+		return {
+			"androidId": this.android_id,
+			"platformId": 1,
+			"appKey": this.apk.app_key,
+			"appVersion": this.apk.version,
+			"beaconIdSrc": beaconIdArr.join(';'),
+			"brand": this.brand,
+			"channelId": "2017",
+			"cid": "",
+			"imei": this.imei,
+			"imsi": this.imsi.toString("hex"),
+			"mac": this.mac_address,
+			"model": this.model,
+			"networkType": "unknown",
+			"oaid": "",
+			"osVersion": `Android ${this.version.release},level ${this.version.sdk}`,
+			"qimei": "",
+			"qimei36": "",
+			"sdkVersion": "1.2.13.6",
+			"targetSdkVersion": "26",
+			"audit": "",
+			"userId": "{}",
+			"packageId": this.apk.id,
+			"deviceType": this.display,
+			"sdkName": "",
+			"reserved": JSON.stringify(reserved),
+		}
+	}
+}
 
 /** 支持的登录设备平台 */
 export enum Platform {
@@ -102,66 +247,81 @@ export enum Platform {
 	aPad = 2,
 	Watch = 3,
 	iMac = 4,
-	iPad = 5,
+	iPad = 5
 }
 
 export type Apk = typeof mobile
-
 const mobile = {
 	id: "com.tencent.mobileqq",
-	name: "A8.8.80.7400",
-	version: "8.8.80.7400",
-	ver: "8.8.80",
-	sign: Buffer.from([166, 183, 69, 191, 36, 162, 194, 119, 82, 119, 22, 246, 243, 110, 182, 141]),
-	buildtime: 1640921786,
+	app_key: '0S200MNJT807V3GE',
+	name: "A8.9.35.10440",
+	version: "8.9.35.10440",
+	ver: "8.9.35",
+	sign: Buffer.from([0xA6, 0xB7, 0x45, 0xBF, 0x24, 0xA2, 0xC2, 0x77, 0x52, 0x77, 0x16, 0xF6, 0xF3, 0x6E, 0xB6, 0x8D]),
+	buildtime: 1676531414,
 	appid: 16,
-	subid: 537143609,
-	bitmap: 184024956,
-	sigmap: 34869472,
-	sdkver: "6.0.0.2494",
+	subid: 537153294,
+	bitmap: 150470524,
+	main_sig_map: 16724722,
+	sub_sig_map: 0x10400,
+	sdkver: "6.0.0.2535",
 	display: "Android",
+	ssover: 19,
 }
 const watch: Apk = {
 	id: "com.tencent.qqlite",
-	name: "A2.0.5",
-	version: "2.0.5",
-	ver: "2.0.5",
+	app_key: '0S200MNJT807V3GE',
+	name: "A2.0.8",
+	version: "2.0.8",
+	ver: "2.0.8",
 	sign: Buffer.from([166, 183, 69, 191, 36, 162, 194, 119, 82, 119, 22, 246, 243, 110, 182, 141]),
 	buildtime: 1559564731,
 	appid: 16,
-	subid: 537064446,
+	subid: 537065138,
 	bitmap: 16252796,
-	sigmap: 34869472,
-	sdkver: "6.0.0.236",
+	main_sig_map: 16724722,
+	sub_sig_map: 0x10400,
+	sdkver: "6.0.0.2365",
 	display: "Watch",
+	ssover: 5
 }
 const hd: Apk = {
 	id: "com.tencent.minihd.qq",
+	app_key: '0S200MNJT807V3GE',
 	name: "A5.9.3.3468",
 	version: "5.9.3.3468",
 	ver: "5.9.3",
-	sign: Buffer.from([170, 57, 120, 244, 31, 217, 111, 249, 145, 74, 102, 158, 24, 100, 116, 199]),
+	sign: Buffer.from([0xAA, 0x39, 0x78, 0xF4, 0x1F, 0xD9, 0x6F, 0xF9, 0x91, 0x4A, 0x66, 0x9E, 0x18, 0x64, 0x74, 0xC7]),
 	buildtime: 1637427966,
 	appid: 16,
-	subid: 537067382,
+	subid: 537128930,
 	bitmap: 150470524,
-	sigmap: 1970400,
+	main_sig_map: 1970400,
+	sub_sig_map: 66560,
 	sdkver: "6.0.0.2487",
-	display: "aPad",
+	display: "iMac",
+	ssover: 12
 }
 
-const apklist: {[platform in Platform]: Apk} = {
+const apklist: { [platform in Platform]: Apk } = {
 	[Platform.Android]: mobile,
-	[Platform.aPad]: hd,
+	[Platform.aPad]: {
+		...mobile,
+		subid: 537152242,
+		display: 'aPad'
+	},
 	[Platform.Watch]: watch,
-	[Platform.iMac]: { ...hd },
-	[Platform.iPad]: { ...hd },
+	[Platform.iMac]: {...hd},
+	[Platform.iPad]: {
+		...mobile,
+		subid: 537151363,
+		sign: hd.sign,
+		name: 'A8.9.33.614',
+		version: 'A8.9.33.614',
+		sdkver: '6.0.0.2433',
+		display: 'iPad'
+	},
 }
-
-apklist[Platform.iMac].subid = 537128930
-apklist[Platform.iMac].display = "iMac"
-apklist[Platform.iPad].subid = 537118796
-apklist[Platform.iPad].display = "iPad"
 
 export function getApkInfo(p: Platform): Apk {
 	return apklist[p] || apklist[Platform.Android]

@@ -2,12 +2,13 @@ import { pb, jce } from "./core"
 import { ErrorCode, drop } from "./errors"
 import { timestamp, parseFunString, NOOP, lock, hide } from "./common"
 import { MemberInfo } from "./entities"
-import { User } from "./friend"
+import { User} from "./friend"
+import {GroupEventMap} from "./group";
 
 type Client = import("./client").Client
 
 const weakmap = new WeakMap<MemberInfo, Member>()
-
+export interface MemberEventMap extends GroupEventMap{}
 /** @ts-ignore ts(2417) 群员(继承User) */
 export class Member extends User {
 
@@ -18,7 +19,7 @@ export class Member extends User {
 		let member = weakmap.get(info!)
 		if (member) return member
 		member = new Member(this, Number(gid), Number(uid), info)
-		if (info) 
+		if (info)
 			weakmap.set(info, member)
 		return member
 	}
@@ -157,14 +158,15 @@ export class Member extends User {
 	}
 
 	/** 踢 */
-	async kick(block = false) {
+	async kick(msg?:string,block = false) {
 		const body = pb.encode({
-			1: this.gid,
-			2: {
-				1: 5,
-				2: this.uid,
-				3: block ? 1 : 0,
+			"1": this.gid,
+			"2": {
+				"1": 5,
+				"2": this.uid,
+				"3": block ? 1 : 0
 			},
+			"5": msg
 		})
 		const payload = await this.c.sendOidb("OidbSvc.0x8a0_0", body)
 		const ret = pb.decode(payload)[4][2][1] === 0

@@ -7,7 +7,13 @@ import { ErrorCode, drop } from "./errors"
 import { Gender, PB_CONTENT, code2uin, timestamp, lock, hide, fileHash, md5, sha, log } from "./common"
 import { Sendable, PrivateMessage, buildMusic, MusicPlatform, Quotable, rand2uuid, genDmMessageId, parseDmMessageId, FileElem } from "./message"
 import { buildSyncCookie, Contactable, highwayHttpUpload, CmdID } from "./internal"
-import { MessageRet } from "./events"
+import {
+	FriendDecreaseEvent,
+	FriendIncreaseEvent,
+	FriendPokeEvent, FriendRecallEvent, FriendRequestEvent, GroupInviteEvent,
+	MessageRet,
+	PrivateMessageEvent
+} from "./events"
 import { FriendInfo } from "./entities"
 
 type Client = import("./client").Client
@@ -59,6 +65,31 @@ export class User extends Contactable {
 		const body = jce.encodeWrapper({ FS }, "mqq.IMService.FriendListServiceServantObj", "GetUserAddFriendSettingReq")
 		const payload = await this.c.sendUni("friendlist.getUserAddFriendSetting", body)
 		return jce.decodeWrapper(payload)[2] as number
+	}
+	/** 点赞，默认一次
+	 * 支持陌生人点赞
+	 */
+	async thumbUp(times = 1) {
+		if (times > 20) times = 20
+		let ReqFavorite
+		if (this.c.fl.get(this.uid)) {
+			ReqFavorite = jce.encodeStruct([
+				jce.encodeNested([
+					this.c.uin, 1, this.c.sig.seq + 1, 1, 0, Buffer.from("0C180001060131160131", "hex")
+				]),
+				this.uid, 0, 1, Number(times)
+			])
+		} else {
+			ReqFavorite = jce.encodeStruct([
+				jce.encodeNested([
+					this.c.uin, 1, this.c.sig.seq + 1, 1, 0, Buffer.from("0C180001060131160135", "hex")
+				]),
+				this.uid, 0, 5, Number(times)
+			])
+		}
+		const body = jce.encodeWrapper({ ReqFavorite }, "VisitorSvc", "ReqFavorite", this.c.sig.seq + 1)
+		const payload = await this.c.sendUni("VisitorSvc.ReqFavorite", body)
+		return jce.decodeWrapper(payload)[0][3] === 0
 	}
 
 	/** 查看资料 */
@@ -151,14 +182,15 @@ export class User extends Contactable {
 	private _getRouting(file = false): pb.Encodable {
 		if (Reflect.has(this, "gid"))
 			return { 3: {
-				1: code2uin(Reflect.get(this, "gid")),
-				2: this.uid,
-			} }
+					1: code2uin(Reflect.get(this, "gid") as number),
+					2: this.uid,
+				} }
 		return file ? { 15: { 1: this.uid, 2: 4 } } : { 1: { 1: this.uid } }
 	}
 
 	/**
 	 * 发送一条消息
+	 * @param content
 	 * @param source 引用回复的消息
 	 */
 	async sendMsg(content: Sendable, source?: Quotable): Promise<MessageRet> {
@@ -184,9 +216,12 @@ export class User extends Contactable {
 			drop(rsp[1], rsp[2])
 		}
 		this.c.logger.info(`succeed to send: [Private(${this.uid})] ` + brief)
+		this.c.stat.sent_msg_cnt++
 		const time = rsp[3]
 		const message_id = genDmMessageId(this.uid, seq, rand, rsp[3], 1)
-		return { message_id, seq, rand, time }
+		const messageRet:MessageRet={ message_id, seq, rand, time }
+		this.c.emit('send',messageRet)
+		return messageRet
 	}
 
 	/** 回添双向好友 */
@@ -304,6 +339,28 @@ export class User extends Contactable {
 	}
 }
 
+export interface PrivateMessageEventMap{
+	'message'(event:PrivateMessageEvent):void
+	'message.friend'(event:PrivateMessageEvent):void
+	'message.group'(event:PrivateMessageEvent):void
+	'message.other'(event:PrivateMessageEvent):void
+	'message.self'(event:PrivateMessageEvent):void
+}
+export interface FriendNoticeEventMap{
+	'notice'(event:FriendIncreaseEvent | FriendDecreaseEvent | FriendRecallEvent | FriendPokeEvent):void
+	'notice.increase'(event:FriendIncreaseEvent):void
+	'notice.decrease'(event:FriendDecreaseEvent):void
+	'notice.recall'(event:FriendRecallEvent):void
+	'notice.poke'(event:FriendPokeEvent):void
+}
+export interface FriendRequestEventMap{
+	'request'(event:FriendRequestEvent):void
+	'request.invite'(event:GroupInviteEvent):void
+	'request.add'(event:FriendRequestEvent):void
+	'request.single'(event:FriendRequestEvent):void
+}
+export interface FriendEventMap extends PrivateMessageEventMap,FriendNoticeEventMap,FriendRequestEventMap{
+}
 /** 好友(继承User) */
 export class Friend extends User {
 
@@ -314,7 +371,7 @@ export class Friend extends User {
 		let friend = weakmap.get(info!)
 		if (friend) return friend
 		friend = new Friend(this, Number(uid), info)
-		if (info) 
+		if (info)
 			weakmap.set(info, friend)
 		return friend
 	}
@@ -344,13 +401,6 @@ export class Friend extends User {
 		super(c, uid)
 		hide(this, "_info")
 	}
-
-	/** 发送音乐分享 */
-	async shareMusic(platform: MusicPlatform, id: string) {
-		const body = await buildMusic(this.uid, platform, id, 0)
-		await this.c.sendOidb("OidbSvc.0xb77_9", pb.encode(body))
-	}
-
 	/** 设置备注 */
 	async setRemark(remark: string) {
 		const req = jce.encodeStruct([ this.uid, String(remark || "") ])
@@ -371,19 +421,6 @@ export class Friend extends User {
 		await this.c.sendUni("friendlist.MovGroupMemReq", body)
 	}
 
-	/** 点赞，默认一次 */
-	async thumbUp(times = 1) {
-		if (times > 20) times = 20
-		const ReqFavorite = jce.encodeStruct([
-			jce.encodeNested([
-				this.c.uin, 1, this.c.sig.seq + 1, 1, 0, Buffer.from("0C180001060131160131", "hex")
-			]),
-			this.uid, 0, 1, Number(times)
-		])
-		const body = jce.encodeWrapper({ ReqFavorite }, "VisitorSvc", "ReqFavorite")
-		const payload = await this.c.sendUni("VisitorSvc.ReqFavorite", body)
-		return jce.decodeWrapper(payload)[0][3] === 0
-	}
 
 	/** 戳一戳 */
 	async poke(self = false) {

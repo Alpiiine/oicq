@@ -1,12 +1,14 @@
-import { deflateSync } from "zlib"
-import { FACE_OLD_BUF, facemap } from "./face"
-import { Image } from "./image"
-import { AtElem, BfaceElem, Quotable, MessageElem, TextElem,
+import {deflateSync} from "zlib"
+import {FACE_OLD_BUF, facemap} from "./face"
+import {Image} from "./image"
+import {
+	AtElem, BfaceElem, Quotable, MessageElem, TextElem,
 	FaceElem, FlashElem, ImageElem, JsonElem, LocationElem, MfaceElem, ReplyElem,
-	MiraiElem, PokeElem, PttElem, Sendable, ShareElem, VideoElem, XmlElem, FileElem } from "./elements"
-import { pb } from "../core"
-import { escapeXml } from "../common"
-import { Anonymous, rand2uuid, parseDmMessageId, parseGroupMessageId } from "./message"
+	MiraiElem, PokeElem, PttElem, Sendable, ShareElem, VideoElem, XmlElem, FileElem, ForwardNode, MusicElem
+} from "./elements"
+import {pb} from "../core"
+import {Anonymous, rand2uuid, parseDmMessageId, parseGroupMessageId} from "./message"
+import {makeMusicJson, MusicFullInfo, MusicPlatform} from "./music";
 
 const EMOJI_NOT_ENDING = ["\uD835", "\uD83C", "\uD83D", "\uD83E", "\u200D"]
 const EMOJI_NOT_STARTING = ["\uFE0F", "\u200D", "\u20E3"]
@@ -46,7 +48,7 @@ export class Converter {
 	is_chain = true
 	elems: pb.Encodable[] = []
 	/** 用于最终发送 */
-	rich: pb.Encodable = { 2: this.elems, 4: null }
+	rich: pb.Encodable = {2: this.elems, 4: null}
 	/** 长度(字符) */
 	length = 0
 	/** 包含的图片(可能需要上传) */
@@ -96,12 +98,12 @@ export class Converter {
 	}
 
 	private at(elem: AtElem) {
-		let { qq, id, text, dummy } = elem
+		let {qq, id, text, dummy} = elem
 		if (qq === 0 && id) {
 			// 频道中的AT
 			this.elems.push({
 				1: {
-					1: text || (id === "all" ? "@全体成员" : ("@"+id)),
+					1: text || (id === "all" ? "@全体成员" : ("@" + id)),
 					12: {
 						3: 2,
 						5: id === "all" ? 0 : BigInt(id)
@@ -131,10 +133,58 @@ export class Converter {
 	}
 
 	private face(elem: FaceElem) {
-		let { id, text } = elem
+		let {id, text, qlottie} = elem
 		id = Number(id)
 		if (id < 0 || id > 0xffff || isNaN(id))
 			throw new Error("wrong face id: " + id)
+		if (qlottie) {
+			if (facemap[id]) {
+				text = facemap[id]
+			} else if (!text) {
+				text = "/" + id;
+			}
+			if (!text.startsWith("/"))
+				text = "/" + text;
+
+			this.elems.push([
+				{
+					53: {
+						1: 37,
+						2: {
+							1: "1",
+							2: qlottie,
+							3: id,
+							4: 1,
+							5: 1,
+							6: "",
+							7: text,
+							8: "",
+							9: 1
+						},
+						3: 1
+					}
+				},
+				{
+					1: {
+						1: text,
+						12: {
+							1: "[" + text.replace("/", "") + "]请使用最新版手机QQ体验新功能"
+						}
+					}
+				},
+				{
+					37: {
+						17: 21908,
+						19: {
+							15: 65536,
+							31: 0,
+							41: 0
+						}
+					}
+				}
+			]);
+			return;
+		}
 		if (id <= 0xff) {
 			const old = Buffer.allocUnsafe(2)
 			old.writeUInt16BE(0x1441 + id)
@@ -166,7 +216,7 @@ export class Converter {
 	}
 
 	private sface(elem: FaceElem) {
-		let { id, text } = elem
+		let {id, text} = elem
 		if (!text)
 			text = String(id)
 		text = "[" + text + "]"
@@ -180,7 +230,7 @@ export class Converter {
 	}
 
 	private bface(elem: BfaceElem, magic?: Buffer) {
-		let { file, text } = elem
+		let {file, text} = elem
 		if (!text) text = "原创表情"
 		text = "[" + String(text).slice(0, 5) + "]"
 		const o = {
@@ -196,7 +246,7 @@ export class Converter {
 			11: 200,
 			12: magic || null
 		}
-		this.elems.push({ 6: o })
+		this.elems.push({6: o})
 		this._text(text)
 	}
 
@@ -218,7 +268,7 @@ export class Converter {
 		const img = new Image(elem, this.ext?.dm, this.ext?.cachedir)
 		this.imgs.push(img)
 		this.elems.push(
-			this.ext?.dm ? { 4: img.proto } : { 8: img.proto }
+			this.ext?.dm ? {4: img.proto} : {8: img.proto}
 		)
 		this.brief += "[图片]"
 	}
@@ -229,7 +279,7 @@ export class Converter {
 		this.elems.push({
 			53: {
 				1: 3,
-				2: this.ext?.dm ? { 2: img.proto } : { 1: img.proto },
+				2: this.ext?.dm ? {2: img.proto} : {1: img.proto},
 				3: 0,
 			}
 		})
@@ -256,20 +306,22 @@ export class Converter {
 		if (!file.startsWith("protobuf://"))
 			throw new Error("非法的视频元素: " + file)
 		const buf = Buffer.from(file.replace("protobuf://", ""), "base64")
-		this.elems.push({ 19: buf })
-		this.elems.push({ 1: {
-			1: "你的QQ暂不支持查看视频短片，请期待后续版本。"
-		} })
+		this.elems.push({19: buf})
+		this.elems.push({
+			1: {
+				1: "你的QQ暂不支持查看视频短片，请期待后续版本。"
+			}
+		})
 		this.brief += "[视频]"
 		this.is_chain = false
 	}
 
 	private location(elem: LocationElem) {
-		let { address, lat, lng, name, id } = elem
+		let {address, lat, lng, name, id} = elem
 		if (!address || !lat || !lng)
 			throw new Error("location share need 'address', 'lat' and 'lng'")
 		let data = {
-			config: { forward: true, type: "card", autosize: true },
+			config: {forward: true, type: "card", autosize: true},
 			prompt: "[应用]地图",
 			from: 1,
 			app: "com.tencent.map",
@@ -290,18 +342,20 @@ export class Converter {
 		})
 	}
 
+	private node(elem: ForwardNode) {
+		throw new Error('这个不能直接发')
+	}
+
+	private music(elem: MusicElem) {
+		if((['title', 'singer', 'jumpUrl', 'musicUrl', 'preview'] as (keyof MusicFullInfo)[]).some(key=>!elem[key]))
+			return this.json({
+				type: 'json',
+				data: makeMusicJson(elem as MusicFullInfo & {platform:MusicPlatform})
+			})
+	}
+
 	private share(elem: ShareElem) {
-		let { url, title, content, image } = elem
-		if (!url || !title)
-			throw new Error("link share need 'url' and 'title'")
-		if (title.length > 26)
-			title = title.substr(0, 25) + "…"
-		title = escapeXml(title)
-		const data = `<?xml version="1.0" encoding="utf-8"?>
-		<msg templateID="12345" action="web" brief="[分享] ${title}" serviceID="1" sourceName="QQ浏览器" url="${escapeXml(url)}"><item layout="2">${image ? `<picture cover="${escapeXml(image)}"/>` : ""}<title>${title}</title><summary>${content ? escapeXml(content) : title}</summary></item><source action="app" name="QQ浏览器" icon="http://url.cn/PWkhNu" i_actionData="tencent100446242://" a_actionData="com.tencent.mtt" appid="100446242" url="http://url.cn/UQoBHn"/></msg>`
-		this.xml({
-			type: "xml", data, id: 1
-		})
+		throw new Error('这个不能直接发')
 	}
 
 	private json(elem: JsonElem) {
@@ -326,7 +380,7 @@ export class Converter {
 	}
 
 	private poke(elem: PokeElem) {
-		let { id } = elem
+		let {id} = elem
 		if (!(id >= 0 && id <= 6))
 			throw new Error("wrong poke id: " + id)
 		this.elems.push({
@@ -345,7 +399,7 @@ export class Converter {
 	}
 
 	private mirai(elem: MiraiElem) {
-		const { data } = elem
+		const {data} = elem
 		this.elems.push({
 			31: {
 				2: String(data),
@@ -360,11 +414,11 @@ export class Converter {
 	}
 
 	private reply(elem: ReplyElem) {
-		const { id } = elem
+		const {id} = elem
 		if (id.length > 24)
-			this.quote({ ...parseGroupMessageId(id), message: "[消息]" })
+			this.quote({...parseGroupMessageId(id), message: elem.text || '[消息]'})
 		else
-			this.quote({ ...parseDmMessageId(id), message: "[消息]" })
+			this.quote({...parseDmMessageId(id), message: elem.text || '[消息]'})
 	}
 
 	/** 转换为分片消息 */
@@ -390,6 +444,7 @@ export class Converter {
 		this._pushFragment(frag)
 		return this.fragments
 	}
+
 	private _divideText(text: string) {
 		let n = 0
 		while (n < text.length) {
@@ -418,6 +473,7 @@ export class Converter {
 			}])
 		}
 	}
+
 	private _pushFragment(proto: pb.Encodable[]) {
 		if (proto.length > 0) {
 			proto.push(PB_RESERVER)
@@ -444,8 +500,8 @@ export class Converter {
 	quote(source: Quotable) {
 		const elems = new Converter(source.message || "", this.ext).elems
 		const tmp = this.brief
-		if(!this.ext?.dm){
-			this.at({ type: "at", qq: source.user_id })
+		if (!this.ext?.dm) {
+			this.at({type: "at", qq: source.user_id})
 			this.elems.unshift(this.elems.pop()!)
 		}
 		this.elems.unshift({

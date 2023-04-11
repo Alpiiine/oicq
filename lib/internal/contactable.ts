@@ -2,14 +2,45 @@ import fs from "fs"
 import path from "path"
 import querystring from "querystring"
 import axios from "axios"
-import { Readable } from "stream"
-import { randomBytes } from "crypto"
-import { exec } from "child_process"
-import { tea, pb, ApiRejection } from "../core"
-import { ErrorCode, drop } from "../errors"
-import { escapeXml, md5, NOOP, timestamp, uuid, md5Stream, IS_WIN, TMP_DIR, gzip, unzip, int32ip2str, lock, pipeline, DownloadTransform, log } from "../common"
-import { Sendable, PrivateMessage, MessageElem, ForwardMessage, Forwardable, Quotable, Image, ImageElem, VideoElem, PttElem, Converter, XmlElem, rand2uuid } from "../message"
-import { CmdID, highwayUpload } from "./highway"
+import {Readable} from "stream"
+import {randomBytes} from "crypto"
+import {exec} from "child_process"
+import {tea, pb, ApiRejection} from "../core"
+import {ErrorCode, drop} from "../errors"
+import {
+	escapeXml,
+	md5,
+	NOOP,
+	timestamp,
+	uuid,
+	md5Stream,
+	IS_WIN,
+	TMP_DIR,
+	gzip,
+	unzip,
+	int32ip2str,
+	lock,
+	pipeline,
+	DownloadTransform,
+	log
+} from "../common"
+import {
+	Sendable,
+	PrivateMessage,
+	MessageElem,
+	ForwardMessage,
+	Forwardable,
+	Quotable,
+	Image,
+	ImageElem,
+	VideoElem,
+	PttElem,
+	Converter,
+	XmlElem,
+	rand2uuid, ForwardNode, MusicPlatform, buildMusic, TextElem, Parser, musicFactory,
+} from "../message"
+import {CmdID, highwayUpload} from "./highway"
+import {buildShare, ShareConfig, ShareContent} from "../message/share";
 
 type Client = import("../client").Client
 
@@ -22,12 +53,12 @@ export abstract class Contactable {
 	protected gid?: number
 
 	// 对方账号，可能是群号也可能是QQ号
-	private get target() {
+	get target() {
 		return this.uid || this.gid || this.c.uin
 	}
 
 	// 是否是 Direct Message (私聊)
-	private get dm() {
+	get dm() {
 		return !!this.uid
 	}
 
@@ -40,6 +71,11 @@ export abstract class Contactable {
 		lock(this, "c")
 	}
 
+	get [Symbol.unscopables]() {
+		return {
+			c: true,
+		}
+	}
 	// 取私聊图片fid
 	private async _offPicUp(imgs: Image[]) {
 		const req: pb.Encodable[] = []
@@ -113,14 +149,14 @@ export abstract class Contactable {
 		this.c.logger.debug(`开始图片任务，共有${imgs.length}张图片`)
 		const tasks: Promise<void>[] = []
 		for (let i = 0; i < imgs.length; i++) {
-			if (imgs[i] instanceof Image === false)
+			if (!(imgs[i] instanceof Image))
 				imgs[i] = new Image(imgs[i] as ImageElem, this.dm, path.join(this.c.dir, "../image"))
 			tasks.push((imgs[i] as Image).task)
 		}
 		const res1 = await Promise.allSettled(tasks) as PromiseRejectedResult[]
 		for (let i = 0; i < res1.length; i++) {
 			if (res1[i].status === "rejected")
-				this.c.logger.warn(`图片${i+1}失败, reason: ` + res1[i].reason?.message)
+				this.c.logger.warn(`图片${i + 1}失败, reason: ` + res1[i].reason?.message)
 		}
 		let n = 0
 		while (imgs.length > n) {
@@ -129,13 +165,13 @@ export abstract class Contactable {
 			const tasks: Promise<any>[] = []
 			for (let i = n; i < imgs.length; ++i) {
 				if (i >= n + 20) break
-				tasks.push(this._uploadImage(imgs[i] as Image, rsp[i%20]))
+				tasks.push(this._uploadImage(imgs[i] as Image, rsp[i % 20]))
 			}
 			const res2 = await Promise.allSettled(tasks) as PromiseRejectedResult[]
 			for (let i = 0; i < res2.length; i++) {
 				if (res2[i].status === "rejected") {
-					res1[n+i] = res2[i]
-					this.c.logger.warn(`图片${n+i+1}上传失败, reason: ` + res2[i].reason?.message)
+					res1[n + i] = res2[i]
+					this.c.logger.warn(`图片${n + i + 1}上传失败, reason: ` + res2[i].reason?.message)
 				}
 			}
 			n += 20
@@ -146,10 +182,10 @@ export abstract class Contactable {
 
 	private async _uploadImage(img: Image, rsp: pb.Proto) {
 		const j = this.dm ? 1 : 0
-		if (rsp[2+j] !== 0)
-			throw new Error(String(rsp[3+j]))
-		img.fid = rsp[9+j].toBuffer?.() || rsp[9+j]
-		if (rsp[4+j]) {
+		if (rsp[2 + j] !== 0)
+			throw new Error(String(rsp[3 + j]))
+		img.fid = rsp[9 + j].toBuffer?.() || rsp[9 + j]
+		if (rsp[4 + j]) {
 			img.deleteTmpFile()
 			return
 		}
@@ -157,8 +193,8 @@ export abstract class Contactable {
 			img.deleteCacheFile()
 			return
 		}
-		const ip = rsp[6+j]?.[0] || rsp[6+j]
-		const port = rsp[7+j]?.[0] || rsp[7+j]
+		const ip = rsp[6 + j]?.[0] || rsp[6 + j]
+		const port = rsp[7 + j]?.[0] || rsp[7 + j]
 		return highwayUpload.call(
 			this.c,
 			img.readable,
@@ -166,28 +202,52 @@ export abstract class Contactable {
 				cmdid: j ? CmdID.DmImage : CmdID.GroupImage,
 				md5: img.md5,
 				size: img.size,
-				ticket: rsp[8+j].toBuffer()
+				ticket: rsp[8 + j].toBuffer()
 			},
 			ip, port
 		).finally(img.deleteTmpFile.bind(img))
 	}
 
+	/** 发送网址分享 */
+	async shareUrl(content: ShareContent, config?: ShareConfig) {
+		const body = buildShare((this.gid||this.uid) as number, this.dm?0:1, content, config)
+		await this.c.sendOidb("OidbSvc.0xb77_9", pb.encode(body))
+	}
+	/** 发送音乐分享 */
+	async shareMusic(platform: MusicPlatform, id: string) {
+		const body = await buildMusic((this.gid||this.uid) as number, this.dm?0:1, platform, id,)
+		await this.c.sendOidb("OidbSvc.0xb77_9", pb.encode(body))
+	}
 	/** 发消息预处理 */
 	protected async _preprocess(content: Sendable, source?: Quotable) {
 		try {
 			if (!Array.isArray(content))
 				content = [content]
-			if ((content[0] as MessageElem).type === "video")
-				content[0] = await this.uploadVideo(content[0] as VideoElem)
-			else if ((content[0] as MessageElem).type === "record")
-				content[0] = await this.uploadPtt(content[0] as PttElem)
+			const forwardNode: ForwardNode[] = content.filter(e => typeof e !== 'string' && e.type === 'node') as ForwardNode[]
+			const task = content.filter(e => !forwardNode.includes(e as any))
+				.map(item => typeof item === "string" ? {type:'text',text:item} as TextElem : item).flat().map(async (elem) => {
+					if (elem.type === 'video') return await this.uploadVideo(elem)
+					if(elem.type==='share') return await this.shareUrl(elem)
+					if(elem.type==='music') return {
+						...await musicFactory[elem.platform].getMusicInfo(elem.id),
+						...elem
+					}
+					if (elem.type === 'record') return await this.uploadPtt(elem)
+					if (elem.type === 'reply') {
+						if (source) return
+						source = await this.c.getMsg(elem.id)
+					}
+					return Promise.resolve(elem)
+				})
+			if(forwardNode.length) task.push(this.makeForwardMsg(forwardNode))
+			content = (await Promise.all(task)).filter(Boolean) as MessageElem[]
 			const converter = new Converter(content, {
 				dm: this.dm,
-				cachedir: path.join(this.c.dir, "../image"),
+				cachedir: path.join(this.c.dir, "image"),
 				mlist: this.c.gml.get(this.gid!)
 			})
 			if (source)
-				converter.quote(source)
+				await converter.quote(source)
 			if (converter.imgs.length)
 				await this.uploadImages(converter.imgs)
 			return converter
@@ -196,10 +256,25 @@ export abstract class Contactable {
 		}
 	}
 
+	private async _downloadFileToTmpDir(url: string, headers?: any) {
+		const saveFileName = uuid()
+		const savePath = path.join(TMP_DIR, saveFileName)
+		let readable = (await axios.get(url, {
+				headers,
+				responseType: "stream",
+			}
+		)).data as Readable
+		readable = readable.pipe(new DownloadTransform)
+		await pipeline(readable, fs.createWriteStream(savePath))
+		return savePath
+
+	}
+
 	/** 上传一个视频以备发送(理论上传一次所有群和好友都能发) */
 	async uploadVideo(elem: VideoElem): Promise<VideoElem> {
-		let { file } = elem
+		let {file} = elem
 		if (file.startsWith("protobuf://")) return elem
+		if (file.startsWith('https://') || file.startsWith('http://')) file = await this._downloadFileToTmpDir(file)
 		file = file.replace(/^file:\/{2}/, "")
 		IS_WIN && file.startsWith("/") && (file = file.slice(1))
 		const thumb = path.join(TMP_DIR, uuid())
@@ -212,10 +287,10 @@ export abstract class Contactable {
 				})
 			})
 		})
-		const [width, height, seconds] = await new Promise((resolve) => {
+		const [width, height, seconds] = await new Promise<number[]>((resolve) => {
 			exec(`${this.c.config.ffprobe_path || "ffprobe"} -i "${file}" -show_streams`, (error, stdout, stderr) => {
 				const lines = (stdout || stderr || "").split("\n")
-				let width = 1280, height = 720, seconds = 120
+				let width: number = 1280, height: number = 720, seconds: number = 120
 				for (const line of lines) {
 					if (line.startsWith("width=")) {
 						width = parseInt(line.slice(6))
@@ -351,7 +426,7 @@ export abstract class Contactable {
 			"User-Agent": `QQ/${this.c.apk.version} CFNetwork/1126`,
 			"Net-Type": "Wifi"
 		}
-		await axios.post(url, buf, { headers })
+		await axios.post(url, buf, {headers})
 		this.c.logger.debug("语音任务结束")
 
 		const fid = rsp[11].toBuffer()
@@ -404,7 +479,7 @@ export abstract class Contactable {
 			}],
 		})
 		const ip = rsp[4]?.[0] || rsp[4], port = rsp[5]?.[0] || rsp[5]
-		await highwayUpload.call(this.c, Readable.from(Buffer.from(buf), { objectMode: false }), {
+		await highwayUpload.call(this.c, Readable.from(Buffer.from(buf), {objectMode: false}), {
 			cmdid: CmdID.MultiMsg,
 			md5: md5(buf),
 			size: buf.length,
@@ -417,7 +492,7 @@ export abstract class Contactable {
 	 * 1. 制作一条合并转发消息以备发送(制作一次可以到处发)。
 	 * 2. 需要注意的是，好友图片和群图片的内部格式不一样，
 	 *    对着群制作的转发消息中的图片，发给好友可能会裂图，反过来也一样。
-	 * 3. 暂不完全支持套娃转发。
+	 * 3. 支持4层套娃转发（PC仅显示三层）。
 	 */
 	async makeForwardMsg(msglist: Forwardable[] | Forwardable): Promise<XmlElem> {
 		if (!Array.isArray(msglist))
@@ -427,8 +502,37 @@ export abstract class Contactable {
 		let imgs: Image[] = []
 		let preview = ""
 		let cnt = 0
+		let MultiMsg = []
+		let brief
 		for (const fake of msglist) {
-			const maker = new Converter(fake.message, { dm: this.dm, cachedir: this.c.config.data_dir })
+			if (!Array.isArray(fake.message)) fake.message = [fake.message]
+			if (fake.message.length === 1 && typeof fake.message[0] !== "string" && ['xml', 'json'].includes(fake.message[0].type)) {
+				const elem = fake.message[0]
+				if (elem.type === 'xml') {
+					let brief_reg = /brief\=\"(.*?)\"/gm.exec(elem.data)
+					if (brief_reg && brief_reg.length > 0) {
+						brief = brief_reg[1]
+					} else brief = '[XML]'
+				} else if (elem.type === 'json') {
+					brief = '[JSON]'
+					let json
+					try {
+						json = JSON.parse(elem.data)
+					} catch (err) {
+					}
+					if (json) {
+						brief = json.prompt
+					}
+				}
+			}
+			const maker = new Converter(fake.message, {
+				dm: this.dm,
+				cachedir: path.join(this.c.dir, "image"),
+			})
+
+			if (maker?.brief && brief) {
+				maker.brief = brief
+			}
 			makers.push(maker)
 			const seq = randomBytes(2).readInt16BE()
 			const rand = randomBytes(4).readInt32BE()
@@ -463,18 +567,21 @@ export abstract class Contactable {
 				}
 			})
 		}
+
+		MultiMsg.push({
+			1: "MultiMsg",
+			2: {
+				1: nodes
+			}
+		})
+
 		for (const maker of makers)
-			imgs = [ ...imgs, ...maker.imgs ]
+			imgs = [...imgs, ...maker.imgs]
 		if (imgs.length)
 			await this.uploadImages(imgs)
 		const compressed = await gzip(pb.encode({
 			1: nodes,
-			2: {
-				1: "MultiMsg",
-				2: {
-					1: nodes
-				}
-			}
+			2: MultiMsg
 		}))
 		const resid = await this._uploadMultiMsg(compressed)
 		const xml = `<?xml version="1.0" encoding="utf-8"?>
@@ -489,7 +596,7 @@ export abstract class Contactable {
 	/** 下载并解析合并转发 */
 	async getForwardMsg(resid: string, fileName: string = "MultiMsg") {
 		const ret = []
-		const buf = await this._downloadMultiMsg(String(resid), 2)
+		const buf = await this._downloadMultiMsg(String(resid), this.dm ? 1 : 2)
 		let a = pb.decode(buf)[2]
 		if (!Array.isArray(a)) a = [a]
 		for (let b of a) {
@@ -505,7 +612,8 @@ export abstract class Contactable {
 		for (let proto of a) {
 			try {
 				ret.push(new ForwardMessage(proto))
-			} catch { }
+			} catch {
+			}
 		}
 		return ret
 	}
@@ -530,12 +638,14 @@ export abstract class Contactable {
 		const port = rsp[5]?.[0] || rsp[5]
 		let url = port == 443 ? "https://ssl.htdata.qq.com" : `http://${ip}:${port}`
 		url += rsp[2]
-		let { data, headers } = await axios.get(url, { headers: {
-			"User-Agent": `QQ/${this.c.apk.version} CFNetwork/1126`,
-			"Net-Type": "Wifi"
-		}, responseType: "arraybuffer"})
+		let {data, headers} = await axios.get(url, {
+			headers: {
+				"User-Agent": `QQ/${this.c.apk.version} CFNetwork/1126`,
+				"Net-Type": "Wifi"
+			}, responseType: "arraybuffer"
+		})
 		data = Buffer.from(data as ArrayBuffer)
-		let buf = headers["accept-encoding"]?.includes("gzip") ?  await unzip(data as Buffer) : data as Buffer
+		let buf = headers["accept-encoding"]?.includes("gzip") ? await unzip(data as Buffer) : data as Buffer
 		const head_len = buf.readUInt32BE(1)
 		const body_len = buf.readUInt32BE(5)
 		buf = tea.decrypt(buf.slice(head_len + 9, head_len + 9 + body_len), rsp[3].toBuffer())
@@ -573,8 +683,8 @@ export abstract class Contactable {
 function createReadable(file1: string, file2: string) {
 	return Readable.from(
 		concatStreams(
-			fs.createReadStream(file1, { highWaterMark: 256 * 1024 }),
-			fs.createReadStream(file2, { highWaterMark: 256 * 1024 })
+			fs.createReadStream(file1, {highWaterMark: 256 * 1024}),
+			fs.createReadStream(file2, {highWaterMark: 256 * 1024})
 		)
 	)
 }
@@ -601,7 +711,7 @@ async function getPttBuffer(file: string | Buffer, ffmpeg = "ffmpeg"): Promise<B
 		}
 	} else if (file.startsWith("http://") || file.startsWith("https://")) {
 		// 网络文件
-		const readable = (await axios.get(file, { responseType: "stream" })).data as Readable
+		const readable = (await axios.get(file, {responseType: "stream"})).data as Readable
 		const tmpfile = path.join(TMP_DIR, uuid())
 		await pipeline(readable.pipe(new DownloadTransform), fs.createWriteStream(tmpfile))
 		const head = await read7Bytes(tmpfile)
