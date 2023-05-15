@@ -23,7 +23,7 @@ const map: { [tag: number]: (this: BaseClient, ...args: any[]) => Writer } = {
 			.writeU16(1) // ip ver
 			.writeBytes(crypto.randomBytes(4))
 			.writeU32(this.uin)
-			.write32(Date.now() & 0xffffffff)
+			.write32((Date.now() / 1000) & 0xffffffff)
 			.writeBytes(Buffer.alloc(4)) //ip
 			.writeU16(0);
 	},
@@ -108,7 +108,7 @@ const map: { [tag: number]: (this: BaseClient, ...args: any[]) => Writer } = {
 			.writeU32(this.apk.appid)
 			.writeU32(0) // app client ver
 			.writeU64(this.uin)
-			.write32(Date.now() & 0xffffffff)
+			.write32((Date.now() / 1000) & 0xffffffff)
 			.writeBytes(Buffer.alloc(4)) // dummy ip
 			.writeU8(1) // save password
 			.writeBytes(md5pass)
@@ -263,7 +263,7 @@ const map: { [tag: number]: (this: BaseClient, ...args: any[]) => Writer } = {
 			.writeBytes(crypto.randomBytes(16))
 			.write32(1)
 			.write32(16)
-			.write32(Date.now() & 0xffffffff)
+			.write32((Date.now() / 1000) & 0xffffffff)
 			.writeBytes(Buffer.alloc(0))
 	},
 	0x401: function () {
